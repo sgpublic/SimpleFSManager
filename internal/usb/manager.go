@@ -15,26 +15,40 @@ import (
 // only while devices are present, so a replacement device reuses the first
 // letter released by a removed device.
 type Manager struct {
-	storage     *storage.Manager
+	storage     storageManager
 	mu          sync.Mutex
 	letters     map[string]rune
 	suppressed  map[string]map[int]bool
 	initialized bool
+	detachDisk  func(rune)
 }
 
-func New(storage *storage.Manager) *Manager {
-	return &Manager{storage: storage, letters: make(map[string]rune), suppressed: make(map[string]map[int]bool)}
+type storageManager interface {
+	List(context.Context) ([]storage.Disk, error)
+	Partition(context.Context, string) (storage.Disk, storage.Partition, error)
+	Mount(context.Context, string, string, string) error
+	Unmount(string) error
+}
+
+func New(storage storageManager) *Manager {
+	return &Manager{
+		storage:    storage,
+		letters:    make(map[string]rune),
+		suppressed: make(map[string]map[int]bool),
+		detachDisk: detach,
+	}
 }
 
 // Reconcile assigns an insertion-order letter to addedDiskPath, releases
 // missing disks, and mounts all supported USB partitions.
 func (m *Manager) Reconcile(ctx context.Context, addedDiskPath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	disks, err := m.storage.List(ctx)
 	if err != nil {
 		return err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	present := make(map[string]storage.Disk)
 	for _, disk := range disks {
@@ -46,7 +60,7 @@ func (m *Manager) Reconcile(ctx context.Context, addedDiskPath string) error {
 		if _, ok := present[path]; ok {
 			continue
 		}
-		m.detach(letter)
+		m.detachDisk(letter)
 		delete(m.letters, path)
 		delete(m.suppressed, path)
 	}
@@ -182,7 +196,7 @@ func (m *Manager) mountDisk(ctx context.Context, disk storage.Disk, letter rune)
 	return errors.Join(failures...)
 }
 
-func (m *Manager) detach(letter rune) {
+func detach(letter rune) {
 	for partition := 'a'; partition <= 'z'; partition++ {
 		_ = unix.Unmount(fmt.Sprintf("/usb%c%c", letter, partition), unix.MNT_DETACH)
 	}
