@@ -1,0 +1,363 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humachi"
+	"github.com/go-chi/chi/v5"
+	"github.com/sgpublic/simplefsmanager/internal/auth"
+	"github.com/sgpublic/simplefsmanager/internal/storage"
+	"github.com/sgpublic/simplefsmanager/internal/store"
+	"github.com/sgpublic/simplefsmanager/internal/volume"
+)
+
+type Health struct {
+	Status string `json:"status" example:"ok" doc:"Service health status"`
+}
+
+type HealthOutput struct {
+	Body Health
+}
+
+type DiskListOutput struct {
+	Body struct {
+		Disks []storage.Disk `json:"disks"`
+	}
+}
+
+type DiskConfirmation struct {
+	DiskPath string `json:"diskPath" minLength:"1"`
+	Confirm  string `json:"confirm" minLength:"1"`
+}
+
+type InitializeGPTInput struct {
+	Body DiskConfirmation
+}
+
+type CreatePartitionInput struct {
+	Body struct {
+		DiskConfirmation
+		SizeBytes uint64 `json:"sizeBytes" minimum:"1048576"`
+		Name      string `json:"name" maxLength:"36"`
+	}
+}
+
+type DeletePartitionInput struct {
+	Body struct {
+		DiskConfirmation
+		PartitionNumber int `json:"partitionNumber" minimum:"1"`
+	}
+}
+
+type FormatInput struct {
+	Body struct {
+		PartitionPath string `json:"partitionPath" minLength:"1"`
+		FileSystem    string `json:"fileSystem" enum:"ext4,xfs"`
+		Confirm       string `json:"confirm" minLength:"1"`
+	}
+}
+
+type MountInput struct {
+	Body struct {
+		PartitionPath string `json:"partitionPath" minLength:"1"`
+		Confirm       string `json:"confirm" minLength:"1"`
+	}
+}
+
+type UnmountInput struct {
+	Body struct {
+		UUID    string `json:"uuid" minLength:"1"`
+		Confirm string `json:"confirm" minLength:"1"`
+	}
+}
+
+type OperationOutput struct {
+	Body struct {
+		Message   string `json:"message"`
+		MountPath string `json:"mountPath,omitempty"`
+		UUID      string `json:"uuid,omitempty"`
+	}
+}
+
+type bootstrapRequest struct {
+	Username        string `json:"username"`
+	SystemPassword  string `json:"systemPassword"`
+	ProjectPassword string `json:"projectPassword"`
+}
+
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func New(database *store.Store, _ *slog.Logger, disks *storage.Manager, frontend http.Handler) http.Handler {
+	router := chi.NewRouter()
+	router.Use(recoverer)
+	authentication := auth.New(database)
+	router.Use(authentication.Middleware)
+	router.Get("/api/auth/status", func(writer http.ResponseWriter, request *http.Request) {
+		status, err := authentication.Status(request.Context(), request)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, status)
+	})
+	router.Post("/api/auth/bootstrap", func(writer http.ResponseWriter, request *http.Request) {
+		var input bootstrapRequest
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			writeError(writer, http.StatusBadRequest, fmt.Errorf("invalid request body"))
+			return
+		}
+		token, err := authentication.Bootstrap(request.Context(), input.Username, input.SystemPassword, input.ProjectPassword)
+		if err != nil {
+			writeError(writer, http.StatusUnauthorized, err)
+			return
+		}
+		http.SetCookie(writer, auth.SessionCookie(token))
+		writeJSON(writer, http.StatusCreated, auth.Status{Authenticated: true, Username: input.Username})
+	})
+	router.Post("/api/auth/login", func(writer http.ResponseWriter, request *http.Request) {
+		var input loginRequest
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			writeError(writer, http.StatusBadRequest, fmt.Errorf("invalid request body"))
+			return
+		}
+		token, err := authentication.Login(request.Context(), input.Username, input.Password)
+		if err != nil {
+			writeError(writer, http.StatusUnauthorized, err)
+			return
+		}
+		http.SetCookie(writer, auth.SessionCookie(token))
+		writeJSON(writer, http.StatusOK, auth.Status{Authenticated: true, Username: input.Username})
+	})
+	router.Post("/api/auth/logout", func(writer http.ResponseWriter, request *http.Request) {
+		authentication.Logout(request.Context(), request)
+		http.SetCookie(writer, auth.ExpiredSessionCookie())
+		writer.WriteHeader(http.StatusNoContent)
+	})
+	api := humachi.New(router, huma.DefaultConfig("SimpleFSManager API", "0.1.0"))
+
+	huma.Get(api, "/api/health", func(context.Context, *struct{}) (*HealthOutput, error) {
+		return &HealthOutput{Body: Health{Status: "ok"}}, nil
+	})
+	huma.Get(api, "/api/disks", func(ctx context.Context, _ *struct{}) (*DiskListOutput, error) {
+		found, err := disks.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		output := &DiskListOutput{}
+		output.Body.Disks = found
+		return output, nil
+	})
+	volumes := volume.New(database, disks)
+
+	huma.Post(api, "/api/disks/gpt", func(ctx context.Context, input *InitializeGPTInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.DiskPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		disk, err := diskByPath(ctx, disks, input.Body.DiskPath)
+		if err != nil {
+			return nil, badRequest(err)
+		}
+		if err := disks.InitializeGPT(ctx, input.Body.DiskPath); err != nil {
+			return nil, badRequest(err)
+		}
+		identity := disk.Serial
+		if identity == "" {
+			identity = disk.Path
+		}
+		if err := database.DeleteVolumesBySerial(ctx, identity); err != nil {
+			return nil, err
+		}
+		return operation("initialized empty GPT", "", ""), nil
+	})
+
+	huma.Post(api, "/api/partitions", func(ctx context.Context, input *CreatePartitionInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.DiskPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		index, err := disks.CreatePartition(ctx, input.Body.DiskPath, input.Body.SizeBytes, input.Body.Name)
+		if err != nil {
+			return nil, badRequest(err)
+		}
+		return operation(fmt.Sprintf("created partition %d", index), "", ""), nil
+	})
+
+	huma.Post(api, "/api/partitions/delete", func(ctx context.Context, input *DeletePartitionInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.DiskPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		disk, partition, err := partitionByNumber(ctx, disks, input.Body.DiskPath, input.Body.PartitionNumber)
+		if err != nil {
+			return nil, badRequest(err)
+		}
+		if err := disks.DeletePartition(ctx, disk.Path, input.Body.PartitionNumber); err != nil {
+			return nil, badRequest(err)
+		}
+		if err := database.DeleteVolumeIfExists(ctx, partition.UUID); err != nil {
+			return nil, err
+		}
+		return operation("deleted partition", "", ""), nil
+	})
+
+	huma.Post(api, "/api/partitions/format", func(ctx context.Context, input *FormatInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.PartitionPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		_, partition, err := disks.Partition(ctx, input.Body.PartitionPath)
+		if err != nil {
+			return nil, badRequest(err)
+		}
+		if err := disks.Format(ctx, input.Body.PartitionPath, input.Body.FileSystem); err != nil {
+			return nil, badRequest(err)
+		}
+		if err := database.DeleteVolumeIfExists(ctx, partition.UUID); err != nil {
+			return nil, err
+		}
+		return operation("formatted partition", "", ""), nil
+	})
+
+	huma.Post(api, "/api/volumes/mount", func(ctx context.Context, input *MountInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.PartitionPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		managed, err := volumes.Mount(ctx, input.Body.PartitionPath)
+		if err != nil {
+			return nil, badRequest(err)
+		}
+		return operation("mounted volume", managed.MountPath, managed.UUID), nil
+	})
+
+	huma.Post(api, "/api/volumes/unmount", func(ctx context.Context, input *UnmountInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.UUID, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		managed, err := volumes.Unmount(ctx, input.Body.UUID)
+		if err != nil {
+			return nil, badRequest(err)
+		}
+		return operation("unmounted volume", managed.MountPath, managed.UUID), nil
+	})
+
+	router.Handle("/*", frontend)
+	return router
+}
+
+func confirm(target, value string) error {
+	if target != value {
+		return fmt.Errorf("confirmation must exactly match %s", target)
+	}
+	return nil
+}
+
+func badRequest(err error) error {
+	return huma.Error400BadRequest(errorCode(err))
+}
+
+func operation(message, mountPath, uuid string) *OperationOutput {
+	output := &OperationOutput{}
+	output.Body.Message = message
+	output.Body.MountPath = mountPath
+	output.Body.UUID = uuid
+	return output
+}
+
+func diskByPath(ctx context.Context, disks *storage.Manager, path string) (storage.Disk, error) {
+	found, err := disks.List(ctx)
+	if err != nil {
+		return storage.Disk{}, err
+	}
+	for _, disk := range found {
+		if disk.Path == path {
+			return disk, nil
+		}
+	}
+	return storage.Disk{}, fmt.Errorf("%s is not a physical disk", path)
+}
+
+func partitionByNumber(ctx context.Context, disks *storage.Manager, diskPath string, number int) (storage.Disk, storage.Partition, error) {
+	disk, err := diskByPath(ctx, disks, diskPath)
+	if err != nil {
+		return storage.Disk{}, storage.Partition{}, err
+	}
+	for _, partition := range disk.Partitions {
+		if partition.Number == number {
+			return disk, partition, nil
+		}
+	}
+	return storage.Disk{}, storage.Partition{}, fmt.Errorf("partition %d does not exist on %s", number, diskPath)
+}
+
+func writeJSON(writer http.ResponseWriter, status int, value any) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(value)
+}
+
+func writeError(writer http.ResponseWriter, status int, err error) {
+	writeJSON(writer, status, map[string]string{"code": errorCode(err)})
+}
+
+func errorCode(err error) string {
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "administrator is already configured"):
+		return "auth_already_configured"
+	case strings.Contains(message, "eligible local non-root"):
+		return "auth_local_user_required"
+	case strings.Contains(message, "system authentication failed"):
+		return "auth_system_auth_failed"
+	case strings.Contains(message, "project password must be at least"):
+		return "auth_password_too_short"
+	case strings.Contains(message, "administrator setup is required"):
+		return "auth_setup_required"
+	case strings.Contains(message, "invalid username or password"):
+		return "auth_invalid_credentials"
+	case strings.Contains(message, "session"):
+		return "auth_required"
+	case strings.Contains(message, "confirmation must exactly match"):
+		return "confirmation_failed"
+	case strings.Contains(message, "system disk"):
+		return "system_disk_protected"
+	case strings.Contains(message, "mounted disk") || strings.Contains(message, "mounted partition"):
+		return "mounted_disk_protected"
+	case strings.Contains(message, "not a physical disk partition"):
+		return "invalid_partition"
+	case strings.Contains(message, "not a physical disk"):
+		return "invalid_disk"
+	case strings.Contains(message, "does not have a GPT"):
+		return "invalid_partition_table"
+	case strings.Contains(message, "managed volume") && strings.Contains(message, "not found"):
+		return "managed_volume_not_found"
+	case strings.Contains(message, "does not exist"):
+		return "partition_not_found"
+	case strings.Contains(message, "unsupported filesystem"):
+		return "unsupported_filesystem"
+	case strings.Contains(message, "must be formatted"):
+		return "unformatted_partition"
+	case strings.Contains(message, "not enough unallocated space"):
+		return "insufficient_space"
+	case strings.Contains(message, "mount target"):
+		return "invalid_mount_target"
+	default:
+		return "internal_error"
+	}
+}
+
+func recoverer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recover() != nil {
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=SimpleFSManager disk management service
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/simplefsmanager -listen 127.0.0.1:8080 -data-dir /var/lib/simplefsmanager
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
