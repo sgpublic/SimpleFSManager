@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install system build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libpam0g-dev libudev-dev
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Verify frontend
+        working-directory: web
+        run: npm run check
+
+      - name: Test service
+        run: CGO_ENABLED=1 go test -tags libudev ./...
+
+      - name: Build service
+        run: CGO_ENABLED=1 make build VERSION="${GITHUB_REF_NAME}" TAGS=libudev
+
+      - name: Build Debian package
+        run: packaging/debian/build.sh "${GITHUB_REF_NAME}" ./simplefsmanager "dist/simplefsmanager_${GITHUB_REF_NAME#v}_amd64.deb"
+
+      - name: Verify Debian package
+        run: dpkg-deb --info dist/*.deb && dpkg-deb --contents dist/*.deb
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*.deb

@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable simplefsmanager.service
+    if systemctl is-active --quiet simplefsmanager.service; then
+        systemctl restart simplefsmanager.service
+    else
+        systemctl start simplefsmanager.service
+    fi
+fi

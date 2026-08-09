@@ -47,7 +47,7 @@ sudo apt install libpam0g-dev
 sudo install -m 644 deploy/simplefsmanager.pam /etc/pam.d/simplefsmanager
 ```
 
-Sessions use HttpOnly, SameSite=Strict cookies. The default HTTP deployment is intentionally loopback-only; keep it that way until TLS is configured.
+Sessions use HttpOnly, SameSite=Strict cookies. Restrict network access until TLS is configured.
 
 User-visible API errors are returned as stable error codes and translated by the frontend. Do not use raw system command, PAM, or database error text as a UI message.
 
@@ -84,6 +84,15 @@ npm run api:generate
 
 ## Deployment
 
-The example unit lives at `deploy/simplefsmanager.service`. It deliberately binds to loopback; put a TLS-enabled reverse proxy in front of it before exposing the UI on a network.
+Tagged releases publish an `amd64` Debian package on GitHub Releases. Install it with:
 
-The service needs root privileges for storage operations. It has a single-administrator login, but keep it bound to loopback until TLS is configured for network exposure.
+```sh
+sudo apt install ./simplefsmanager_*.deb
+systemctl status simplefsmanager
+```
+
+The package installs the service unit and PAM configuration, then enables and starts the service. Removing the package stops and disables the service, but preserves `/var/lib/simplefsmanager`.
+
+The example unit lives at `deploy/simplefsmanager.service`. The service defaults to listening on `0.0.0.0:7376`; restrict it with a firewall or add a systemd override with `-listen 127.0.0.1:7376` before exposing the UI through a TLS-enabled reverse proxy.
+
+The service needs root privileges for storage operations. It has a single-administrator login, but restrict network access until TLS is configured for network exposure.
