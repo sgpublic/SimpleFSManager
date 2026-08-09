@@ -9,6 +9,12 @@ import (
 
 var ErrUdevUnavailable = errors.New("udev monitoring requires a libudev-enabled build")
 
+type UdevEvent struct {
+	Action  string
+	Devnode string
+	Devtype string
+}
+
 type FileSystemUsage struct {
 	TotalBytes     uint64 `json:"totalBytes"`
 	UsedBytes      uint64 `json:"usedBytes"`
@@ -33,6 +39,8 @@ type Disk struct {
 	Serial       string      `json:"serial"`
 	SizeBytes    uint64      `json:"sizeBytes"`
 	Partitioning string      `json:"partitioning"`
+	Transport    string      `json:"transport"`
+	USB          bool        `json:"usb"`
 	Protected    bool        `json:"protected"`
 	System       bool        `json:"system"`
 	Mountpoints  []string    `json:"mountpoints"`

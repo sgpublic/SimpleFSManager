@@ -20,6 +20,10 @@ A disk is treated as the system disk when it contains a mounted partition whose 
 
 The first successful mount registers its filesystem UUID in SQLite and allocates the next permanent `/volN` path. At startup and on udev events, only these registered UUIDs are restored; `/etc/fstab` is never modified or read.
 
+USB storage (`lsblk TRAN=usb`) uses a separate transient mount space. Attached devices receive insertion-order letters and supported ext4/xfs partitions are automatically mounted at `/usb<device-letter><partition-letter>`, for example `/usbaa` and `/usbab`. Removing a USB device releases its letter for the next device; USB storage only supports mount and unmount.
+
+Manually unmounting a USB partition suppresses its automatic mount for the current insertion cycle. Mounting it again or physically removing the device clears that suppression.
+
 ## Development
 
 Requirements: Go 1.26+, Node.js 24+, npm, and the Linux tools required by the implemented storage features.

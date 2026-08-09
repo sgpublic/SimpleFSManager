@@ -32,6 +32,8 @@
     "capacity": "容量",
     "partitionTable": "分区表",
     "partitions": "分区数",
+    "transport": "传输类型",
+    "unknown": "未知",
     "none": "无",
     "unformatted": "未格式化",
     "initializeGPT": "初始化 GPT",
@@ -70,6 +72,9 @@
     "insufficient_space": "没有足够的未分配空间创建此分区。",
     "invalid_mount_target": "挂载目标无效。",
     "managed_volume_not_found": "受管卷已不存在。",
+    "usb_mutation_not_supported": "USB 存储设备仅支持挂载和卸载。",
+    "not_usb_partition": "所选分区不属于 USB 存储设备。",
+    "usb_capacity_exceeded": "连接的 USB 设备或分区数量过多。",
     "internal_error": "发生内部错误，请检查服务日志。"
   }
 }

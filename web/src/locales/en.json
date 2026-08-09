@@ -32,6 +32,8 @@
     "capacity": "Capacity",
     "partitionTable": "Partition table",
     "partitions": "Partitions",
+    "transport": "Transport",
+    "unknown": "Unknown",
     "none": "None",
     "unformatted": "Unformatted",
     "initializeGPT": "Initialize GPT",
@@ -70,6 +72,9 @@
     "insufficient_space": "There is not enough unallocated space for this partition.",
     "invalid_mount_target": "The mount target is invalid.",
     "managed_volume_not_found": "The managed volume no longer exists.",
+    "usb_mutation_not_supported": "USB storage supports mounting and unmounting only.",
+    "not_usb_partition": "The selected partition is not on a USB storage device.",
+    "usb_capacity_exceeded": "Too many USB devices or partitions are attached.",
     "internal_error": "An internal error occurred. Check the service log."
   }
 }

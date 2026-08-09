@@ -24,6 +24,7 @@ type lsblkDevice struct {
 	Size        uint64        `json:"size"`
 	Model       string        `json:"model"`
 	Serial      string        `json:"serial"`
+	Transport   string        `json:"tran"`
 	PTType      string        `json:"pttype"`
 	FSType      string        `json:"fstype"`
 	UUID        string        `json:"uuid"`
@@ -32,7 +33,7 @@ type lsblkDevice struct {
 }
 
 func (m *Manager) List(ctx context.Context) ([]Disk, error) {
-	output, err := m.runner.Run(ctx, "lsblk", "--json", "--bytes", "--output", "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,PTTYPE,FSTYPE,UUID,MOUNTPOINTS")
+	output, err := m.runner.Run(ctx, "lsblk", "--json", "--bytes", "--output", "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,PTTYPE,FSTYPE,UUID,MOUNTPOINTS")
 	if err != nil {
 		return nil, fmt.Errorf("list block devices: %w", err)
 	}
@@ -52,6 +53,8 @@ func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 			Name:         device.Name,
 			Model:        strings.TrimSpace(device.Model),
 			Serial:       strings.TrimSpace(device.Serial),
+			Transport:    strings.TrimSpace(device.Transport),
+			USB:          strings.EqualFold(strings.TrimSpace(device.Transport), "usb"),
 			SizeBytes:    device.Size,
 			Partitioning: device.PTType,
 			Mountpoints:  mountpoints(device.Mountpoints),
@@ -59,7 +62,7 @@ func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 		}
 		disk.Protected = len(disk.Mountpoints) > 0
 		// Whole-disk mounts have no partition UUID and cannot be managed volumes.
-		disk.System = len(disk.Mountpoints) > 0
+		disk.System = len(disk.Mountpoints) > 0 && !disk.USB
 		for _, child := range device.Children {
 			if child.Type != "part" {
 				continue
@@ -82,7 +85,7 @@ func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 				if err != nil {
 					return nil, err
 				}
-				disk.System = disk.System || !managed
+				disk.System = disk.System || (!disk.USB && !managed)
 				partition.Usage = usage(partition.Mountpoints[0])
 			}
 			disk.Partitions = append(disk.Partitions, partition)

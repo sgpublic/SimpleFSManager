@@ -6,6 +6,6 @@ import (
 	"context"
 )
 
-func WatchUdev(context.Context, func()) error {
+func WatchUdev(context.Context, func(UdevEvent)) error {
 	return ErrUdevUnavailable
 }

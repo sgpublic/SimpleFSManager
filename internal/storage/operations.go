@@ -15,6 +15,7 @@ import (
 )
 
 var volumePath = regexp.MustCompile(`^/vol[1-9][0-9]*$`)
+var usbPath = regexp.MustCompile(`^/usb[a-z][a-z]$`)
 
 // InitializeGPT replaces the target disk's partition table with an empty GPT.
 // The caller must obtain explicit user confirmation before calling this method.
@@ -130,7 +131,7 @@ func (m *Manager) DeletePartition(ctx context.Context, diskPath string, index in
 }
 
 func (m *Manager) Format(ctx context.Context, partitionPath, filesystem string) error {
-	if err := m.ensureUnusedPartition(ctx, partitionPath); err != nil {
+	if err := m.ensureUnusedPartition(ctx, partitionPath, false); err != nil {
 		return err
 	}
 	var command string
@@ -153,10 +154,10 @@ func (m *Manager) Mount(ctx context.Context, partitionPath, target, filesystem s
 	if filesystem != "ext4" && filesystem != "xfs" {
 		return fmt.Errorf("unsupported filesystem %q", filesystem)
 	}
-	if !volumePath.MatchString(target) {
-		return fmt.Errorf("mount target must be /volN")
+	if !volumePath.MatchString(target) && !usbPath.MatchString(target) {
+		return fmt.Errorf("mount target must be /volN or /usbXY")
 	}
-	if err := m.ensureUnusedPartition(ctx, partitionPath); err != nil {
+	if err := m.ensureUnusedPartition(ctx, partitionPath, true); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Clean(target), 0o755); err != nil {
@@ -169,8 +170,8 @@ func (m *Manager) Mount(ctx context.Context, partitionPath, target, filesystem s
 }
 
 func (m *Manager) Unmount(target string) error {
-	if !volumePath.MatchString(target) {
-		return fmt.Errorf("mount target must be /volN")
+	if !volumePath.MatchString(target) && !usbPath.MatchString(target) {
+		return fmt.Errorf("mount target must be /volN or /usbXY")
 	}
 	if err := unix.Unmount(target, 0); err != nil {
 		return fmt.Errorf("unmount %s: %w", target, err)
@@ -241,6 +242,9 @@ func (m *Manager) ensureUnusedDisk(ctx context.Context, diskPath string) error {
 	}
 	for _, disk := range disks {
 		if disk.Path == diskPath {
+			if disk.USB {
+				return fmt.Errorf("USB storage only supports mount and unmount")
+			}
 			if disk.Protected {
 				return fmt.Errorf("refusing to modify mounted disk %s", diskPath)
 			}
@@ -250,7 +254,7 @@ func (m *Manager) ensureUnusedDisk(ctx context.Context, diskPath string) error {
 	return fmt.Errorf("%s is not a physical disk", diskPath)
 }
 
-func (m *Manager) ensureUnusedPartition(ctx context.Context, partitionPath string) error {
+func (m *Manager) ensureUnusedPartition(ctx context.Context, partitionPath string, allowUSB bool) error {
 	disks, err := m.List(ctx)
 	if err != nil {
 		return err
@@ -258,6 +262,9 @@ func (m *Manager) ensureUnusedPartition(ctx context.Context, partitionPath strin
 	for _, disk := range disks {
 		for _, partition := range disk.Partitions {
 			if partition.Path == partitionPath {
+				if disk.USB && !allowUSB {
+					return fmt.Errorf("USB storage only supports mount and unmount")
+				}
 				if disk.System {
 					return fmt.Errorf("refusing to modify system disk %s", disk.Path)
 				}

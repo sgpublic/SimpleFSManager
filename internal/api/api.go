@@ -14,6 +14,7 @@ import (
 	"github.com/sgpublic/simplefsmanager/internal/auth"
 	"github.com/sgpublic/simplefsmanager/internal/storage"
 	"github.com/sgpublic/simplefsmanager/internal/store"
+	"github.com/sgpublic/simplefsmanager/internal/usb"
 	"github.com/sgpublic/simplefsmanager/internal/volume"
 )
 
@@ -96,7 +97,7 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-func New(database *store.Store, _ *slog.Logger, disks *storage.Manager, frontend http.Handler) http.Handler {
+func New(database *store.Store, _ *slog.Logger, disks *storage.Manager, usbVolumes *usb.Manager, frontend http.Handler) http.Handler {
 	router := chi.NewRouter()
 	router.Use(recoverer)
 	authentication := auth.New(database)
@@ -246,6 +247,28 @@ func New(database *store.Store, _ *slog.Logger, disks *storage.Manager, frontend
 		return operation("unmounted volume", managed.MountPath, managed.UUID), nil
 	})
 
+	huma.Post(api, "/api/usb/mount", func(ctx context.Context, input *MountInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.PartitionPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		target, err := usbVolumes.Mount(ctx, input.Body.PartitionPath)
+		if err != nil {
+			return nil, badRequest(err)
+		}
+		return operation("mounted USB partition", target, ""), nil
+	})
+
+	huma.Post(api, "/api/usb/unmount", func(ctx context.Context, input *MountInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.PartitionPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		target, err := usbVolumes.Unmount(ctx, input.Body.PartitionPath)
+		if err != nil {
+			return nil, badRequest(err)
+		}
+		return operation("unmounted USB partition", target, ""), nil
+	})
+
 	router.Handle("/*", frontend)
 	return router
 }
@@ -340,6 +363,14 @@ func errorCode(err error) string {
 		return "partition_not_found"
 	case strings.Contains(message, "unsupported filesystem"):
 		return "unsupported_filesystem"
+	case strings.Contains(message, "USB storage only supports") || strings.Contains(message, "USB storage is managed"):
+		return "usb_mutation_not_supported"
+	case strings.Contains(message, "not a USB partition"):
+		return "not_usb_partition"
+	case strings.Contains(message, "USB partition must use"):
+		return "unsupported_filesystem"
+	case strings.Contains(message, "USB device"):
+		return "usb_capacity_exceeded"
 	case strings.Contains(message, "must be formatted"):
 		return "unformatted_partition"
 	case strings.Contains(message, "not enough unallocated space"):

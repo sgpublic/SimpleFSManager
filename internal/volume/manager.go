@@ -24,6 +24,9 @@ func (m *Manager) Mount(ctx context.Context, partitionPath string) (store.Volume
 	if err != nil {
 		return store.Volume{}, err
 	}
+	if disk.USB {
+		return store.Volume{}, fmt.Errorf("USB storage is managed at /usbXY")
+	}
 	if partition.UUID == "" || partition.FileSystem == "" {
 		return store.Volume{}, fmt.Errorf("%s must be formatted before mounting", partitionPath)
 	}
@@ -65,6 +68,9 @@ func (m *Manager) Recover(ctx context.Context) error {
 	}
 	for _, volume := range volumes {
 		for _, disk := range disks {
+			if disk.USB {
+				continue
+			}
 			for _, partition := range disk.Partitions {
 				if partition.UUID != volume.UUID {
 					continue

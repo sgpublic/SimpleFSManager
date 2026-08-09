@@ -3,6 +3,7 @@ import { HardDrive, LockKeyhole, LogOut, Plus, RefreshCw, ShieldAlert, TriangleA
 import { useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "./api/client";
+import { Dashboard } from "./dashboard";
 
 type AuthStatus = { setupRequired: boolean; authenticated: boolean; username?: string };
 type Operation = { path: string; body: Record<string, unknown> };
@@ -45,7 +46,7 @@ function Login({ username, onComplete }: { username: string; onComplete: () => v
   return <AuthShell><AuthCard title={t("auth.signInTitle")} description={t("auth.signInDescription", { username })}><form onSubmit={(event) => { event.preventDefault(); login.mutate(); }} className="space-y-4"><Field label={t("auth.username")} value={username} onChange={() => undefined} disabled /><Field label={t("auth.projectPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" /><AuthError error={login.error} /><SubmitButton pending={login.isPending}>{t("auth.signIn")}</SubmitButton></form></AuthCard></AuthShell>;
 }
 
-function Dashboard({ username, onLogout }: { username: string; onLogout: () => void }) {
+function LegacyDashboard({ username, onLogout }: { username: string; onLogout: () => void }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const disks = useQuery({ queryKey: ["disks"], queryFn: async () => {

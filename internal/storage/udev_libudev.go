@@ -10,7 +10,7 @@ import (
 )
 
 // WatchUdev calls changed when a block device is added, removed, or changed.
-func WatchUdev(ctx context.Context, changed func()) error {
+func WatchUdev(ctx context.Context, changed func(UdevEvent)) error {
 	u := udev.Udev{}
 	monitor := u.NewMonitorFromNetlink("udev")
 	if err := monitor.FilterAddMatchSubsystem("block"); err != nil {
@@ -30,7 +30,7 @@ func WatchUdev(ctx context.Context, changed func()) error {
 			}
 		case device := <-events:
 			if device != nil && (device.Action() == "add" || device.Action() == "remove" || device.Action() == "change") {
-				changed()
+				changed(UdevEvent{Action: device.Action(), Devnode: device.Devnode(), Devtype: device.Devtype()})
 			}
 		}
 	}

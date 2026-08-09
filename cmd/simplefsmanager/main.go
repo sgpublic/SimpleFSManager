@@ -15,6 +15,7 @@ import (
 	"github.com/sgpublic/simplefsmanager/internal/api"
 	"github.com/sgpublic/simplefsmanager/internal/storage"
 	"github.com/sgpublic/simplefsmanager/internal/store"
+	"github.com/sgpublic/simplefsmanager/internal/usb"
 	"github.com/sgpublic/simplefsmanager/internal/volume"
 	"github.com/sgpublic/simplefsmanager/internal/web"
 )
@@ -48,15 +49,27 @@ func main() {
 	defer stop()
 	disks := storage.New(db.IsManagedUUID)
 	volumes := volume.New(db, disks)
+	usbVolumes := usb.New(disks)
 	if err := volumes.Recover(ctx); err != nil {
 		logger.Error("restore managed volumes", "error", err)
 	}
+	if err := usbVolumes.Reconcile(ctx, ""); err != nil {
+		logger.Error("mount USB volumes", "error", err)
+	}
 	go func() {
-		if err := storage.WatchUdev(ctx, func() {
+		if err := storage.WatchUdev(ctx, func(event storage.UdevEvent) {
 			logger.Info("block device topology changed")
 			go func() {
+				time.Sleep(500 * time.Millisecond)
 				if err := volumes.Recover(ctx); err != nil {
 					logger.Error("restore managed volumes after udev event", "error", err)
+				}
+				addedDiskPath := ""
+				if event.Action == "add" && event.Devtype == "disk" {
+					addedDiskPath = event.Devnode
+				}
+				if err := usbVolumes.Reconcile(ctx, addedDiskPath); err != nil {
+					logger.Error("mount USB volumes after udev event", "error", err)
 				}
 			}()
 		}); err != nil && !errors.Is(err, storage.ErrUdevUnavailable) {
@@ -64,7 +77,7 @@ func main() {
 		}
 	}()
 
-	handler := api.New(db, logger, disks, web.Handler())
+	handler := api.New(db, logger, disks, usbVolumes, web.Handler())
 	server := &http.Server{
 		Addr:              *address,
 		Handler:           handler,
