@@ -112,12 +112,12 @@ func usbDisk(mountpoints []string) storage.Disk {
 func TestReconcileSerializesSnapshotAndMount(t *testing.T) {
 	firstListEntered := make(chan struct{})
 	releaseFirstList := make(chan struct{})
-	storage := &fakeStorage{
+	backend := &fakeStorage{
 		disks:            []storage.Disk{usbDisk(nil)},
 		firstListEntered: firstListEntered,
 		releaseFirstList: releaseFirstList,
 	}
-	manager := New(storage)
+	manager := New(backend)
 
 	first := make(chan error, 1)
 	go func() { first <- manager.Reconcile(context.Background(), "/dev/sda") }()
@@ -131,25 +131,25 @@ func TestReconcileSerializesSnapshotAndMount(t *testing.T) {
 	if err := <-second; err != nil {
 		t.Fatal(err)
 	}
-	storage.mu.Lock()
-	defer storage.mu.Unlock()
-	if storage.mounts != 1 {
-		t.Fatalf("mounts = %d, want 1", storage.mounts)
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.mounts != 1 {
+		t.Fatalf("mounts = %d, want 1", backend.mounts)
 	}
 }
 
 func TestReconcileReturnsMountFailure(t *testing.T) {
 	mountErr := errors.New("input/output error")
-	storage := &fakeStorage{disks: []storage.Disk{usbDisk(nil)}, mountErr: mountErr}
-	err := New(storage).Reconcile(context.Background(), "/dev/sda")
+	backend := &fakeStorage{disks: []storage.Disk{usbDisk(nil)}, mountErr: mountErr}
+	err := New(backend).Reconcile(context.Background(), "/dev/sda")
 	if !errors.Is(err, mountErr) {
 		t.Fatalf("error = %v, want wrapped %v", err, mountErr)
 	}
 }
 
 func TestReconcileKeepsManualUnmountSuppressed(t *testing.T) {
-	storage := &fakeStorage{disks: []storage.Disk{usbDisk([]string{"/usbaa"})}}
-	manager := New(storage)
+	backend := &fakeStorage{disks: []storage.Disk{usbDisk([]string{"/usbaa"})}}
+	manager := New(backend)
 	if err := manager.Reconcile(context.Background(), "/dev/sda"); err != nil {
 		t.Fatal(err)
 	}
@@ -159,29 +159,29 @@ func TestReconcileKeepsManualUnmountSuppressed(t *testing.T) {
 	if err := manager.Reconcile(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
-	storage.mu.Lock()
-	defer storage.mu.Unlock()
-	if storage.mounts != 0 {
-		t.Fatalf("mounts = %d, want 0", storage.mounts)
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.mounts != 0 {
+		t.Fatalf("mounts = %d, want 0", backend.mounts)
 	}
 }
 
 func TestReconcileReusesLetterAfterRemoval(t *testing.T) {
-	storage := &fakeStorage{disks: []storage.Disk{usbDisk(nil)}}
-	manager := New(storage)
+	backend := &fakeStorage{disks: []storage.Disk{usbDisk(nil)}}
+	manager := New(backend)
 	manager.detachDisk = func(rune) {}
 	if err := manager.Reconcile(context.Background(), "/dev/sda"); err != nil {
 		t.Fatal(err)
 	}
-	storage.mu.Lock()
-	storage.disks = nil
-	storage.mu.Unlock()
+	backend.mu.Lock()
+	backend.disks = nil
+	backend.mu.Unlock()
 	if err := manager.Reconcile(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
-	storage.mu.Lock()
-	storage.disks = []storage.Disk{usbDisk(nil)}
-	storage.mu.Unlock()
+	backend.mu.Lock()
+	backend.disks = []storage.Disk{usbDisk(nil)}
+	backend.mu.Unlock()
 	if err := manager.Reconcile(context.Background(), "/dev/sda"); err != nil {
 		t.Fatal(err)
 	}

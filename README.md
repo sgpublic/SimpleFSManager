@@ -75,6 +75,12 @@ make build
 
 Override the detected value with `make build VERSION=v0.1.0` when needed.
 
+Run the test suite after building the embedded frontend:
+
+```sh
+make test
+```
+
 Regenerate frontend API types after changing Huma endpoints. The service must be running locally:
 
 ```sh

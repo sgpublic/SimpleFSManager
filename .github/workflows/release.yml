@@ -38,6 +38,9 @@ jobs:
         working-directory: web
         run: npm run check
 
+      - name: Build embedded frontend
+        run: make frontend
+
       - name: Test service
         run: CGO_ENABLED=1 go test -tags libudev ./...
 
