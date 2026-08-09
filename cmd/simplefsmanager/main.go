@@ -21,7 +21,7 @@ import (
 
 func main() {
 	var (
-		address  = flag.String("listen", "127.0.0.1:7376", "HTTP listen address")
+		address  = flag.String("listen", "0.0.0.0:7376", "HTTP listen address")
 		dataDir  = flag.String("data-dir", "/var/lib/simplefsmanager", "persistent data directory")
 		showHelp = flag.Bool("help", false, "show usage")
 	)
