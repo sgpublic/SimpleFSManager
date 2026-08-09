@@ -65,14 +65,15 @@ npm install
 npm run dev
 ```
 
-Build the embedded frontend, then the service:
+Build the embedded frontend and service. The binary version comes from the
+nearest Git tag plus its commit distance; an untagged checkout uses its commit
+ID and a dirty checkout includes the `-dirty` suffix:
 
 ```sh
-cd web
-npm run build
-cd ..
-go build -o simplefsmanager ./cmd/simplefsmanager
+make build
 ```
+
+Override the detected value with `make build VERSION=v0.1.0` when needed.
 
 Regenerate frontend API types after changing Huma endpoints. The service must be running locally:
 

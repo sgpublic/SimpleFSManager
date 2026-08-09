@@ -12,7 +12,7 @@ class ApiError extends Error {
   }
 }
 
-export function Dashboard({ username, onLogout }: { username: string; onLogout: () => void }) {
+export function Dashboard({ version, username, onLogout }: { version: string; username: string; onLogout: () => void }) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const disks = useQuery({ queryKey: ["disks"], queryFn: async () => {
@@ -53,7 +53,7 @@ export function Dashboard({ username, onLogout }: { username: string; onLogout: 
   return <main className="min-h-screen bg-slate-950 px-6 py-10 text-slate-100">
     <section className="mx-auto max-w-5xl">
       <header className="flex items-center justify-between border-b border-slate-800 pb-6">
-        <div className="flex items-center gap-3"><HardDrive className="text-cyan-400" /><div><h1 className="text-xl font-semibold">SimpleFSManager</h1><p className="text-sm text-slate-400">{t("dashboard.signedIn", { username })}</p></div></div>
+        <div className="flex items-center gap-3"><HardDrive className="text-cyan-400" /><div><h1 className="text-xl font-semibold">SimpleFSManager</h1><p className="text-sm text-slate-400">{t("dashboard.signedIn", { username })}</p><p className="mt-1 text-xs text-slate-600">{version}</p></div></div>
         <div className="flex items-center gap-4"><LanguageSelect value={i18n.resolvedLanguage} onChange={(language) => void i18n.changeLanguage(language)} /><button onClick={() => void logout()} className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-slate-100"><LogOut size={16} />{t("dashboard.signOut")}</button></div>
       </header>
       <section className="mt-12">

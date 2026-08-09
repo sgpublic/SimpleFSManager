@@ -12,6 +12,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
 	"github.com/sgpublic/simplefsmanager/internal/auth"
+	"github.com/sgpublic/simplefsmanager/internal/buildinfo"
 	"github.com/sgpublic/simplefsmanager/internal/storage"
 	"github.com/sgpublic/simplefsmanager/internal/store"
 	"github.com/sgpublic/simplefsmanager/internal/usb"
@@ -24,6 +25,14 @@ type Health struct {
 
 type HealthOutput struct {
 	Body Health
+}
+
+type BuildInfo struct {
+	Version string `json:"version" example:"v0.1.0" doc:"Version of the running service"`
+}
+
+type BuildInfoOutput struct {
+	Body BuildInfo
 }
 
 type DiskListOutput struct {
@@ -143,8 +152,11 @@ func New(database *store.Store, _ *slog.Logger, disks *storage.Manager, usbVolum
 		http.SetCookie(writer, auth.ExpiredSessionCookie())
 		writer.WriteHeader(http.StatusNoContent)
 	})
-	api := humachi.New(router, huma.DefaultConfig("SimpleFSManager API", "0.1.0"))
+	api := humachi.New(router, huma.DefaultConfig("SimpleFSManager API", buildinfo.Version))
 
+	huma.Get(api, "/api/build-info", func(context.Context, *struct{}) (*BuildInfoOutput, error) {
+		return &BuildInfoOutput{Body: BuildInfo{Version: buildinfo.Version}}, nil
+	})
 	huma.Get(api, "/api/health", func(context.Context, *struct{}) (*HealthOutput, error) {
 		return &HealthOutput{Body: Health{Status: "ok"}}, nil
 	})

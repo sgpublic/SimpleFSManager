@@ -242,6 +242,6 @@ func tokenHash(token string) string {
 }
 
 func publicEndpoint(method, path string) bool {
-	return method == http.MethodGet && (path == "/api/health" || path == "/api/auth/status") ||
+	return method == http.MethodGet && (path == "/api/health" || path == "/api/build-info" || path == "/api/auth/status") ||
 		method == http.MethodPost && (path == "/api/auth/bootstrap" || path == "/api/auth/login")
 }
