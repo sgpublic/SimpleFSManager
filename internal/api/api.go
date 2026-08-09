@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -50,11 +51,22 @@ type InitializeGPTInput struct {
 	Body DiskConfirmation
 }
 
+type ReclaimDiskInput struct {
+	Body DiskConfirmation
+}
+
+type RebootInput struct {
+	Body struct {
+		Confirm string `json:"confirm" minLength:"1"`
+	}
+}
+
 type CreatePartitionInput struct {
 	Body struct {
 		DiskConfirmation
-		SizeBytes uint64 `json:"sizeBytes" minimum:"1048576"`
-		Name      string `json:"name" maxLength:"36"`
+		SizeBytes      uint64 `json:"sizeBytes"`
+		UseLargestFree bool   `json:"useLargestFree"`
+		Name           string `json:"name" maxLength:"36"`
 	}
 }
 
@@ -89,9 +101,10 @@ type UnmountInput struct {
 
 type OperationOutput struct {
 	Body struct {
-		Message   string `json:"message"`
-		MountPath string `json:"mountPath,omitempty"`
-		UUID      string `json:"uuid,omitempty"`
+		Message        string `json:"message"`
+		MountPath      string `json:"mountPath,omitempty"`
+		UUID           string `json:"uuid,omitempty"`
+		RebootRequired bool   `json:"rebootRequired,omitempty"`
 	}
 }
 
@@ -106,9 +119,9 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-func New(database *store.Store, _ *slog.Logger, disks *storage.Manager, usbVolumes *usb.Manager, frontend http.Handler) http.Handler {
+func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usbVolumes *usb.Manager, frontend http.Handler) http.Handler {
 	router := chi.NewRouter()
-	router.Use(recoverer)
+	router.Use(recoverer(logger))
 	authentication := auth.New(database)
 	router.Use(authentication.Middleware)
 	router.Get("/api/auth/status", func(writer http.ResponseWriter, request *http.Request) {
@@ -177,26 +190,61 @@ func New(database *store.Store, _ *slog.Logger, disks *storage.Manager, usbVolum
 		}
 		disk, err := diskByPath(ctx, disks, input.Body.DiskPath)
 		if err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "initialize GPT", err, "disk", input.Body.DiskPath)
 		}
-		if err := disks.InitializeGPT(ctx, input.Body.DiskPath); err != nil {
-			return nil, badRequest(err)
+		rebootRequired, err := disks.InitializeGPT(ctx, input.Body.DiskPath)
+		if err != nil {
+			return nil, operationError(logger, "initialize GPT", err, "disk", input.Body.DiskPath)
 		}
 		identity := disk.Serial
 		if identity == "" {
 			identity = disk.Path
 		}
 		if err := database.DeleteVolumesBySerial(ctx, identity); err != nil {
+			logOperationError(logger, "remove volumes after GPT initialization", err, "disk", input.Body.DiskPath)
 			return nil, err
 		}
-		return operation("initialized empty GPT", "", ""), nil
+		return operation("initialized empty GPT", "", "", rebootRequired), nil
+	})
+
+	huma.Post(api, "/api/disks/reclaim", func(ctx context.Context, input *ReclaimDiskInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.DiskPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		disk, err := diskByPath(ctx, disks, input.Body.DiskPath)
+		if err != nil {
+			return nil, operationError(logger, "reclaim disk", err, "disk", input.Body.DiskPath)
+		}
+		rebootRequired, err := disks.Reclaim(ctx, input.Body.DiskPath)
+		if err != nil {
+			return nil, operationError(logger, "reclaim disk", err, "disk", input.Body.DiskPath)
+		}
+		identity := disk.Serial
+		if identity == "" {
+			identity = disk.Path
+		}
+		if err := database.DeleteVolumesBySerial(ctx, identity); err != nil {
+			logOperationError(logger, "remove volumes after reclaiming disk", err, "disk", input.Body.DiskPath)
+			return nil, err
+		}
+		return operation("reclaimed disk with empty GPT", "", "", rebootRequired), nil
+	})
+
+	huma.Post(api, "/api/system/reboot", func(ctx context.Context, input *RebootInput) (*OperationOutput, error) {
+		if err := confirm("system", input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		if err := disks.Reboot(ctx); err != nil {
+			return nil, operationError(logger, "restart system", err)
+		}
+		return operation("restarting system", "", "", false), nil
 	})
 
 	huma.Post(api, "/api/partitions", func(ctx context.Context, input *CreatePartitionInput) (*OperationOutput, error) {
 		if err := confirm(input.Body.DiskPath, input.Body.Confirm); err != nil {
 			return nil, badRequest(err)
 		}
-		index, err := disks.CreatePartition(ctx, input.Body.DiskPath, input.Body.SizeBytes, input.Body.Name)
+		index, err := disks.CreatePartition(ctx, input.Body.DiskPath, input.Body.SizeBytes, input.Body.UseLargestFree, input.Body.Name)
 		if err != nil {
 			return nil, badRequest(err)
 		}
@@ -209,12 +257,13 @@ func New(database *store.Store, _ *slog.Logger, disks *storage.Manager, usbVolum
 		}
 		disk, partition, err := partitionByNumber(ctx, disks, input.Body.DiskPath, input.Body.PartitionNumber)
 		if err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "delete partition", err, "disk", input.Body.DiskPath, "partitionNumber", input.Body.PartitionNumber)
 		}
 		if err := disks.DeletePartition(ctx, disk.Path, input.Body.PartitionNumber); err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "delete partition", err, "disk", disk.Path, "partitionNumber", input.Body.PartitionNumber)
 		}
 		if err := database.DeleteVolumeIfExists(ctx, partition.UUID); err != nil {
+			logOperationError(logger, "remove volume after partition deletion", err, "disk", disk.Path, "partition", partition.Path)
 			return nil, err
 		}
 		return operation("deleted partition", "", ""), nil
@@ -226,12 +275,13 @@ func New(database *store.Store, _ *slog.Logger, disks *storage.Manager, usbVolum
 		}
 		_, partition, err := disks.Partition(ctx, input.Body.PartitionPath)
 		if err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "format partition", err, "partition", input.Body.PartitionPath, "filesystem", input.Body.FileSystem)
 		}
 		if err := disks.Format(ctx, input.Body.PartitionPath, input.Body.FileSystem); err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "format partition", err, "partition", input.Body.PartitionPath, "filesystem", input.Body.FileSystem)
 		}
 		if err := database.DeleteVolumeIfExists(ctx, partition.UUID); err != nil {
+			logOperationError(logger, "remove volume after formatting", err, "partition", partition.Path)
 			return nil, err
 		}
 		return operation("formatted partition", "", ""), nil
@@ -296,11 +346,21 @@ func badRequest(err error) error {
 	return huma.Error400BadRequest(errorCode(err))
 }
 
-func operation(message, mountPath, uuid string) *OperationOutput {
+func operationError(logger *slog.Logger, operation string, err error, args ...any) error {
+	if errorCode(err) == "internal_error" {
+		logOperationError(logger, operation, err, args...)
+	}
+	return badRequest(err)
+}
+
+func operation(message, mountPath, uuid string, rebootRequired ...bool) *OperationOutput {
 	output := &OperationOutput{}
 	output.Body.Message = message
 	output.Body.MountPath = mountPath
 	output.Body.UUID = uuid
+	if len(rebootRequired) > 0 {
+		output.Body.RebootRequired = rebootRequired[0]
+	}
 	return output
 }
 
@@ -389,18 +449,31 @@ func errorCode(err error) string {
 		return "insufficient_space"
 	case strings.Contains(message, "mount target"):
 		return "invalid_mount_target"
+	case strings.Contains(message, "restart system"):
+		return "reboot_failed"
+	case strings.Contains(message, "does not contain a reclaimable storage stack"):
+		return "reclaim_not_available"
+	case strings.Contains(message, "dmsetup") || strings.Contains(message, "mdadm") || strings.Contains(message, "cryptsetup") || strings.Contains(message, "wipefs"):
+		return "reclaim_tool_failed"
 	default:
 		return "internal_error"
 	}
 }
 
-func recoverer(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if recover() != nil {
-				http.Error(w, "internal server error", http.StatusInternalServerError)
-			}
-		}()
-		next.ServeHTTP(w, r)
-	})
+func logOperationError(logger *slog.Logger, operation string, err error, args ...any) {
+	logger.Error("storage operation failed", append([]any{"operation", operation, "error", err}, args...)...)
+}
+
+func recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Error("panic while serving request", "method", r.Method, "path", r.URL.Path, "panic", recovered, "stack", string(debug.Stack()))
+					http.Error(w, "internal server error", http.StatusInternalServerError)
+				}
+			}()
+			next.ServeHTTP(w, r)
+		})
+	}
 }

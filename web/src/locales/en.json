@@ -41,13 +41,25 @@
     "mount": "Mount",
     "unmount": "Unmount",
     "format": "Format",
-    "delete": "Delete"
+    "delete": "Delete",
+    "reclaim": "Reclaim and erase disk",
+    "rebootRequired": "The GPT was written, but the system must restart before the new partition table can be used.",
+    "restartSystem": "Restart system"
   },
-  "prompts": {
-    "confirm": "This operation can permanently destroy data. Type exactly:\n{{target}}",
-    "partitionSize": "Partition size in GiB",
+  "dialog": {
+    "irreversible": "Irreversible operation",
+    "warning": "This operation can permanently destroy data. Verify the target; you can continue when the countdown ends.",
+    "filesystem": "Filesystem",
+    "partitionMode": "Partition size",
+    "largestFree": "Use the largest contiguous free space",
+    "largestFreeHint": "Calculated precisely by the service for disks with multiple free regions.",
+    "manualSize": "Set size manually",
+    "partitionSize": "Partition size (GiB)",
     "partitionName": "Partition label (optional)",
-    "filesystem": "Filesystem: ext4 or xfs"
+    "maximumSize": "Maximum {{size}} GiB",
+    "cancel": "Cancel",
+    "processing": "Processing...",
+    "confirmIn": "Confirm in {{seconds}}s"
   },
   "language": { "label": "Language", "english": "English", "chinese": "中文" },
   "errors": {
@@ -75,6 +87,9 @@
     "usb_mutation_not_supported": "USB storage supports mounting and unmounting only.",
     "not_usb_partition": "The selected partition is not on a USB storage device.",
     "usb_capacity_exceeded": "Too many USB devices or partitions are attached.",
+    "reclaim_not_available": "This disk does not contain a reclaimable legacy storage stack.",
+    "reclaim_tool_failed": "Unable to stop the legacy storage stack or clear its signatures. Check the service log.",
+    "reboot_failed": "Unable to request a system restart. Check the service log.",
     "internal_error": "An internal error occurred. Check the service log."
   }
 }

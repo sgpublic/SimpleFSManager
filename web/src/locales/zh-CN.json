@@ -41,13 +41,25 @@
     "mount": "挂载",
     "unmount": "卸载",
     "format": "格式化",
-    "delete": "删除"
+    "delete": "删除",
+    "reclaim": "接管并清空磁盘",
+    "rebootRequired": "GPT 已写入磁盘，但系统需重启后才能使用新的分区表。",
+    "restartSystem": "重启系统"
   },
-  "prompts": {
-    "confirm": "此操作可能永久销毁数据。请准确输入：\n{{target}}",
-    "partitionSize": "分区容量，单位 GiB",
-    "partitionName": "分区标签，可留空",
-    "filesystem": "文件系统：ext4 或 xfs"
+  "dialog": {
+    "irreversible": "不可逆操作",
+    "warning": "此操作可能永久销毁数据。请确认目标无误，倒计时结束后才能继续。",
+    "filesystem": "文件系统",
+    "partitionMode": "分区容量",
+    "largestFree": "占满最大连续空闲区",
+    "largestFreeHint": "由服务端精确计算，适用于有多个空闲区域的磁盘。",
+    "manualSize": "手动设置容量",
+    "partitionSize": "分区容量 (GiB)",
+    "partitionName": "分区标签（可选）",
+    "maximumSize": "最大 {{size}} GiB",
+    "cancel": "取消",
+    "processing": "处理中...",
+    "confirmIn": "{{seconds}} 秒后可确认"
   },
   "language": { "label": "语言", "english": "English", "chinese": "中文" },
   "errors": {
@@ -75,6 +87,9 @@
     "usb_mutation_not_supported": "USB 存储设备仅支持挂载和卸载。",
     "not_usb_partition": "所选分区不属于 USB 存储设备。",
     "usb_capacity_exceeded": "连接的 USB 设备或分区数量过多。",
+    "reclaim_not_available": "该磁盘没有可接管的旧存储栈。",
+    "reclaim_tool_failed": "未能停止旧存储栈或清除其签名。请检查服务日志。",
+    "reboot_failed": "无法请求系统重启。请检查服务日志。",
     "internal_error": "发生内部错误，请检查服务日志。"
   }
 }

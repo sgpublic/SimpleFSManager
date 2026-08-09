@@ -78,3 +78,37 @@ func TestListReturnsPhysicalDisksAndFallsBackToBlkid(t *testing.T) {
 		t.Fatalf("partition = %#v", partition)
 	}
 }
+
+func TestListMarksInactiveRAIDAndLVMStackReclaimable(t *testing.T) {
+	manager := &Manager{runner: fakeRunner{run: func(name string, _ ...string) ([]byte, error) {
+		if name != "lsblk" {
+			return nil, fmt.Errorf("unexpected command %s", name)
+		}
+		return []byte(`{"blockdevices":[{"name":"nvme1n1","path":"/dev/nvme1n1","type":"disk","size":1000,"mountpoints":[null],"children":[{"name":"nvme1n1p1","path":"/dev/nvme1n1p1","type":"part","size":900,"mountpoints":[null],"children":[{"name":"md127","path":"/dev/md127","type":"raid1","size":900,"mountpoints":[null],"children":[{"name":"legacy","path":"/dev/mapper/legacy","type":"lvm","size":900,"mountpoints":[null]}]}]}]}]}`), nil
+	}}}
+
+	disks, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(disks) != 1 || !disks[0].Reclaimable || disks[0].Protected || disks[0].System {
+		t.Fatalf("disk = %#v", disks)
+	}
+}
+
+func TestListProtectsMountedStorageStack(t *testing.T) {
+	manager := &Manager{runner: fakeRunner{run: func(name string, _ ...string) ([]byte, error) {
+		if name != "lsblk" {
+			return nil, fmt.Errorf("unexpected command %s", name)
+		}
+		return []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","size":1000,"mountpoints":[null],"children":[{"name":"sdb1","path":"/dev/sdb1","type":"part","size":900,"mountpoints":[null],"children":[{"name":"md0","path":"/dev/md0","type":"raid1","size":900,"mountpoints":[null],"children":[{"name":"system","path":"/dev/mapper/system","type":"lvm","size":900,"mountpoints":["/"]}]}]}]}]}`), nil
+	}}}
+
+	disks, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(disks) != 1 || !disks[0].Reclaimable || !disks[0].Protected || !disks[0].System {
+		t.Fatalf("disk = %#v", disks)
+	}
+}

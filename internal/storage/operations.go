@@ -2,11 +2,14 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/diskfs/go-diskfs"
 	diskpkg "github.com/diskfs/go-diskfs/disk"
@@ -19,33 +22,71 @@ var usbPath = regexp.MustCompile(`^/usb[a-z][a-z]$`)
 
 // InitializeGPT replaces the target disk's partition table with an empty GPT.
 // The caller must obtain explicit user confirmation before calling this method.
-func (m *Manager) InitializeGPT(ctx context.Context, diskPath string) error {
+func (m *Manager) InitializeGPT(ctx context.Context, diskPath string) (bool, error) {
 	if err := m.ensureUnusedDisk(ctx, diskPath); err != nil {
-		return err
+		return false, err
 	}
-	disk, err := diskfs.Open(diskPath)
+	return m.initializeGPT(diskPath)
+}
+
+// Reclaim replaces an inactive RAID/LVM/crypt storage stack with an empty GPT.
+// The stack must not have any mounted filesystems.
+func (m *Manager) Reclaim(ctx context.Context, diskPath string) (bool, error) {
+	device, err := m.device(ctx, diskPath)
 	if err != nil {
-		return fmt.Errorf("open disk for GPT initialization: %w", err)
+		return false, err
 	}
-	table := &gpt.Table{
-		LogicalSectorSize:  int(disk.LogicalBlocksize),
-		PhysicalSectorSize: int(disk.PhysicalBlocksize),
-		ProtectiveMBR:      true,
+	if strings.EqualFold(strings.TrimSpace(device.Transport), "usb") {
+		return false, fmt.Errorf("USB storage only supports mount and unmount")
 	}
-	if err := disk.Partition(table); err != nil {
-		disk.Close()
-		return fmt.Errorf("write GPT: %w", err)
+	if len(mountpoints(device.Mountpoints)) > 0 || hasMountedDescendant(device) {
+		return false, fmt.Errorf("refusing to reclaim mounted disk %s", diskPath)
 	}
-	if err := disk.Close(); err != nil {
-		return fmt.Errorf("close GPT device: %w", err)
+	if !hasStorageStack(device) {
+		return false, fmt.Errorf("disk %s does not contain a reclaimable storage stack", diskPath)
 	}
-	return rereadPartitionTable(diskPath)
+
+	for _, child := range postorder(device) {
+		switch {
+		case child.Type == "lvm":
+			if _, err := m.runner.Run(ctx, "dmsetup", "remove", "--retry", child.Path); err != nil {
+				return false, fmt.Errorf("deactivate logical volume %s: %w", child.Path, err)
+			}
+		case child.Type == "crypt":
+			if _, err := m.runner.Run(ctx, "cryptsetup", "close", filepath.Base(child.Path)); err != nil {
+				return false, fmt.Errorf("close encrypted volume %s: %w", child.Path, err)
+			}
+		case strings.HasPrefix(child.Type, "raid"):
+			if _, err := m.runner.Run(ctx, "mdadm", "--stop", child.Path); err != nil {
+				return false, fmt.Errorf("stop RAID device %s: %w", child.Path, err)
+			}
+		}
+	}
+
+	for _, child := range device.Children {
+		if child.Type != "part" {
+			continue
+		}
+		if hasRAIDDescendant(child) {
+			if _, err := m.runner.Run(ctx, "mdadm", "--zero-superblock", "--force", child.Path); err != nil {
+				return false, fmt.Errorf("clear RAID signature from %s: %w", child.Path, err)
+			}
+		}
+		if _, err := m.runner.Run(ctx, "wipefs", "--all", "--force", child.Path); err != nil {
+			return false, fmt.Errorf("clear signatures from %s: %w", child.Path, err)
+		}
+	}
+	if _, err := m.runner.Run(ctx, "wipefs", "--all", "--force", diskPath); err != nil {
+		return false, fmt.Errorf("clear signatures from %s: %w", diskPath, err)
+	}
+	return m.initializeGPT(diskPath)
 }
 
 // CreatePartition allocates one Linux filesystem partition from an unused GPT
-// disk. sizeBytes is rounded up to the device's logical sector size.
-func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeBytes uint64, name string) (int, error) {
-	if sizeBytes == 0 {
+// disk. sizeBytes is rounded up to the device's logical sector size. When
+// useLargestFree is true, it fills the largest contiguous unallocated region.
+func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeBytes uint64, useLargestFree bool, name string) (int, error) {
+	if sizeBytes == 0 && !useLargestFree {
 		return 0, fmt.Errorf("partition size must be greater than zero")
 	}
 	if err := m.ensureUnusedDisk(ctx, diskPath); err != nil {
@@ -61,18 +102,30 @@ func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeByte
 		return 0, err
 	}
 
-	sectorSize := uint64(disk.LogicalBlocksize)
-	needed := (sizeBytes + sectorSize - 1) / sectorSize
-	start, ok := nextPartitionStart(table, needed)
-	if !ok {
-		disk.Close()
-		return 0, fmt.Errorf("not enough unallocated space for %d bytes", sizeBytes)
+	var start, end uint64
+	if useLargestFree {
+		var ok bool
+		start, end, ok = largestPartitionGap(table)
+		if !ok {
+			disk.Close()
+			return 0, fmt.Errorf("not enough unallocated space")
+		}
+	} else {
+		sectorSize := uint64(disk.LogicalBlocksize)
+		needed := (sizeBytes + sectorSize - 1) / sectorSize
+		var ok bool
+		start, ok = nextPartitionStart(table, needed)
+		if !ok {
+			disk.Close()
+			return 0, fmt.Errorf("not enough unallocated space for %d bytes", sizeBytes)
+		}
+		end = start + needed - 1
 	}
 	index := nextPartitionIndex(table)
 	table.Partitions = append(table.Partitions, &gpt.Partition{
 		Index: index,
 		Start: start,
-		End:   start + needed - 1,
+		End:   end,
 		Type:  gpt.LinuxFilesystem,
 		Name:  name,
 	})
@@ -191,6 +244,81 @@ func rereadPartitionTable(diskPath string) error {
 	return nil
 }
 
+func (m *Manager) device(ctx context.Context, diskPath string) (lsblkDevice, error) {
+	output, err := m.runner.Run(ctx, "lsblk", "--json", "--bytes", "--output", "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,PTTYPE,FSTYPE,UUID,MOUNTPOINTS")
+	if err != nil {
+		return lsblkDevice{}, fmt.Errorf("list block devices: %w", err)
+	}
+	var result lsblkOutput
+	if err := json.Unmarshal(output, &result); err != nil {
+		return lsblkDevice{}, fmt.Errorf("decode lsblk output: %w", err)
+	}
+	for _, device := range result.BlockDevices {
+		if device.Type == "disk" && device.Path == diskPath {
+			return device, nil
+		}
+	}
+	return lsblkDevice{}, fmt.Errorf("%s is not a physical disk", diskPath)
+}
+
+func postorder(device lsblkDevice) []lsblkDevice {
+	devices := make([]lsblkDevice, 0)
+	for _, child := range device.Children {
+		devices = append(devices, postorder(child)...)
+		devices = append(devices, child)
+	}
+	return devices
+}
+
+func hasRAIDDescendant(device lsblkDevice) bool {
+	for _, child := range device.Children {
+		if strings.HasPrefix(child.Type, "raid") || hasRAIDDescendant(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) Reboot(ctx context.Context) error {
+	if _, err := m.runner.Run(ctx, "systemctl", "reboot"); err != nil {
+		return fmt.Errorf("restart system: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) initializeGPT(diskPath string) (bool, error) {
+	disk, err := diskfs.Open(diskPath)
+	if err != nil {
+		return false, fmt.Errorf("open disk for GPT initialization: %w", err)
+	}
+	table := &gpt.Table{
+		LogicalSectorSize:  int(disk.LogicalBlocksize),
+		PhysicalSectorSize: int(disk.PhysicalBlocksize),
+		ProtectiveMBR:      true,
+	}
+	if err := disk.Partition(table); err != nil {
+		disk.Close()
+		if requiresReboot(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("write GPT: %w", err)
+	}
+	if err := disk.Close(); err != nil {
+		return false, fmt.Errorf("close GPT device: %w", err)
+	}
+	if err := rereadPartitionTable(diskPath); err != nil {
+		if requiresReboot(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+func requiresReboot(err error) bool {
+	return errors.Is(err, diskpkg.ErrReReadDeferred) || errors.Is(err, unix.EBUSY)
+}
+
 func gptTable(device *diskpkg.Disk) (*gpt.Table, error) {
 	table, err := device.GetPartitionTable()
 	if err != nil {
@@ -217,6 +345,29 @@ func nextPartitionStart(table *gpt.Table, needed uint64) (uint64, bool) {
 		}
 	}
 	return start, start+needed-1 <= table.LastDataSector()
+}
+
+func largestPartitionGap(table *gpt.Table) (uint64, uint64, bool) {
+	partitions := append([]*gpt.Partition(nil), table.Partitions...)
+	sort.Slice(partitions, func(i, j int) bool { return partitions[i].Start < partitions[j].Start })
+	const alignment = uint64(2048)
+	start := alignment
+	var largestStart, largestEnd uint64
+	for _, partition := range partitions {
+		if partition.Start > start {
+			end := partition.Start - 1
+			if largestEnd < largestStart || end-start > largestEnd-largestStart {
+				largestStart, largestEnd = start, end
+			}
+		}
+		if partition.End >= start {
+			start = alignSector(partition.End+1, alignment)
+		}
+	}
+	if start <= table.LastDataSector() && (largestEnd < largestStart || table.LastDataSector()-start > largestEnd-largestStart) {
+		largestStart, largestEnd = start, table.LastDataSector()
+	}
+	return largestStart, largestEnd, largestEnd >= largestStart
 }
 
 func alignSector(value, alignment uint64) uint64 {

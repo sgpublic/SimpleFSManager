@@ -43,6 +43,7 @@ type Disk struct {
 	USB          bool        `json:"usb"`
 	Protected    bool        `json:"protected"`
 	System       bool        `json:"system"`
+	Reclaimable  bool        `json:"reclaimable"`
 	Mountpoints  []string    `json:"mountpoints"`
 	Partitions   []Partition `json:"partitions"`
 }

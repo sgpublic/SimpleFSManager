@@ -88,11 +88,34 @@ func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 				disk.System = disk.System || (!disk.USB && !managed)
 				partition.Usage = usage(partition.Mountpoints[0])
 			}
+			if hasMountedDescendant(child) {
+				disk.Protected = true
+				disk.System = disk.System || !disk.USB
+			}
 			disk.Partitions = append(disk.Partitions, partition)
 		}
+		disk.Reclaimable = hasStorageStack(device)
 		disks = append(disks, disk)
 	}
 	return disks, nil
+}
+
+func hasMountedDescendant(device lsblkDevice) bool {
+	for _, child := range device.Children {
+		if len(mountpoints(child.Mountpoints)) > 0 || hasMountedDescendant(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasStorageStack(device lsblkDevice) bool {
+	for _, child := range device.Children {
+		if strings.HasPrefix(child.Type, "raid") || child.Type == "lvm" || child.Type == "crypt" || hasStorageStack(child) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) managesUUID(ctx context.Context, uuid string) (bool, error) {
