@@ -36,6 +36,7 @@
     "unknown": "未知",
     "none": "无",
     "unformatted": "未格式化",
+    "spaceUsage": "已用 {{used}} / 共 {{total}}",
     "initializeGPT": "初始化 GPT",
     "createPartition": "创建分区",
     "mount": "挂载",

@@ -36,6 +36,7 @@
     "unknown": "Unknown",
     "none": "None",
     "unformatted": "Unformatted",
+    "spaceUsage": "{{used}} used / {{total}}",
     "initializeGPT": "Initialize GPT",
     "createPartition": "Create partition",
     "mount": "Mount",

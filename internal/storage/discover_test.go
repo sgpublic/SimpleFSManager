@@ -33,6 +33,25 @@ func TestListEncodesEmptyCollectionsAsArrays(t *testing.T) {
 	}
 }
 
+func TestListReportsUsageForMountedPartition(t *testing.T) {
+	mountpoint := t.TempDir()
+	manager := &Manager{runner: fakeRunner{run: func(name string, _ ...string) ([]byte, error) {
+		if name != "lsblk" {
+			return nil, fmt.Errorf("unexpected command %s", name)
+		}
+		return []byte(fmt.Sprintf(`{"blockdevices":[{"name":"sdc","path":"/dev/sdc","type":"disk","size":1000,"mountpoints":[null],"children":[{"name":"sdc1","path":"/dev/sdc1","type":"part","size":900,"mountpoints":[%q]}]}]}`, mountpoint)), nil
+	}}}
+
+	disks, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := disks[0].Partitions[0].Usage
+	if usage == nil || usage.TotalBytes == 0 || usage.UsedBytes > usage.TotalBytes {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
+
 func (r fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	return r.run(name, args...)
 }
