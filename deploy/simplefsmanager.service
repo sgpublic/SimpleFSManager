@@ -10,9 +10,7 @@ ExecStart=/usr/bin/simplefsmanager
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=false
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=full
+MountFlags=shared
 
 [Install]
 WantedBy=multi-user.target
