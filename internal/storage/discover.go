@@ -32,6 +32,23 @@ type lsblkDevice struct {
 	Children    []lsblkDevice `json:"children"`
 }
 
+type smartctlOutput struct {
+	Temperature *struct {
+		Current *float64 `json:"current"`
+	} `json:"temperature"`
+	SmartStatus *struct {
+		Passed *bool `json:"passed"`
+	} `json:"smart_status"`
+	Attributes *struct {
+		Table []struct {
+			ID  int `json:"id"`
+			Raw struct {
+				Value *float64 `json:"value"`
+			} `json:"raw"`
+		} `json:"table"`
+	} `json:"ata_smart_attributes"`
+}
+
 func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 	output, err := m.runner.Run(ctx, "lsblk", "--json", "--bytes", "--output", "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,PTTYPE,FSTYPE,UUID,MOUNTPOINTS")
 	if err != nil {
@@ -60,6 +77,7 @@ func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 			Mountpoints:  mountpoints(device.Mountpoints),
 			Partitions:   make([]Partition, 0),
 		}
+		disk.TemperatureCelsius, disk.SmartHealth = m.smartMetadata(ctx, disk.Path)
 		disk.Protected = len(disk.Mountpoints) > 0
 		// Whole-disk mounts have no partition UUID and cannot be managed volumes.
 		disk.System = len(disk.Mountpoints) > 0 && !disk.USB
@@ -98,6 +116,38 @@ func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 		disks = append(disks, disk)
 	}
 	return disks, nil
+}
+
+func (m *Manager) smartMetadata(ctx context.Context, path string) (*float64, *bool) {
+	runner, ok := m.runner.(commandOutputRunner)
+	if !ok {
+		return nil, nil
+	}
+	// smartctl can return a non-zero status for a failed SMART check while
+	// still returning useful JSON, so parse its output even when it errors.
+	output, _ := runner.RunOutput(ctx, "smartctl", "--json", "-a", path)
+	var result smartctlOutput
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, nil
+	}
+
+	var temperature *float64
+	if result.Temperature != nil {
+		temperature = result.Temperature.Current
+	}
+	if temperature == nil && result.Attributes != nil {
+		for _, attribute := range result.Attributes.Table {
+			if (attribute.ID == 190 || attribute.ID == 194) && attribute.Raw.Value != nil {
+				temperature = attribute.Raw.Value
+				break
+			}
+		}
+	}
+	var health *bool
+	if result.SmartStatus != nil {
+		health = result.SmartStatus.Passed
+	}
+	return temperature, health
 }
 
 func hasMountedDescendant(device lsblkDevice) bool {

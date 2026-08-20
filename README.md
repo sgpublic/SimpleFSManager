@@ -11,6 +11,7 @@ Single-user Linux disk management UI. The first release is intentionally limited
 - OpenAPI endpoint at `/openapi.json` and generated TypeScript API types
 - Embedded production frontend
 - Live physical disk and partition discovery through `lsblk --json`, with `blkid` fallback for UUID and filesystem type
+- SMART health and temperature discovery through `smartctl --json`; unavailable SMART data is reported as unavailable
 - Mounted filesystem capacity through `unix.Statfs`
 - GPT initialization and partition changes through `go-diskfs`, ext4/xfs formatting, mount/unmount, and `BLKRRPART` partition-table rereads
 
@@ -28,7 +29,7 @@ Manually unmounting a USB partition suppresses its automatic mount for the curre
 
 Requirements: Go 1.26+, Node.js 24+, npm, and the Linux tools required by the implemented storage features.
 
-`lsblk`, `blkid`, and `mkfs.ext4` are required for their respective features. XFS formatting also requires `mkfs.xfs`. The `go-udev` monitor is behind the `libudev` build tag because it needs CGO and libudev development headers:
+`lsblk`, `blkid`, `smartctl`, and `mkfs.ext4` are required for their respective features. XFS formatting also requires `mkfs.xfs`. SMART data is optional at runtime: disks without SMART support or systems without `smartctl` remain visible without temperature and health data. The `go-udev` monitor is behind the `libudev` build tag because it needs CGO and libudev development headers:
 
 ```sh
 go build -tags libudev ./cmd/simplefsmanager

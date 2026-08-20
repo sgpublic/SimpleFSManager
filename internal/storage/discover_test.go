@@ -131,3 +131,58 @@ func TestListProtectsMountedStorageStack(t *testing.T) {
 		t.Fatalf("disk = %#v", disks)
 	}
 }
+
+type smartMetadataRunner struct {
+	lsblkOutput []byte
+	smartOutput []byte
+	smartErr    error
+}
+
+func (r smartMetadataRunner) Run(_ context.Context, name string, _ ...string) ([]byte, error) {
+	if name != "lsblk" {
+		return nil, fmt.Errorf("unexpected command %s", name)
+	}
+	return r.lsblkOutput, nil
+}
+
+func (r smartMetadataRunner) RunOutput(_ context.Context, name string, _ ...string) ([]byte, error) {
+	if name != "smartctl" {
+		return nil, fmt.Errorf("unexpected command %s", name)
+	}
+	return r.smartOutput, r.smartErr
+}
+
+func TestListReadsSMARTMetadataEvenWhenSmartctlReportsFailure(t *testing.T) {
+	temperature := 62.0
+	manager := &Manager{runner: smartMetadataRunner{
+		lsblkOutput: []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","size":1000,"mountpoints":[null]}]}`),
+		smartOutput: []byte(fmt.Sprintf(`{"temperature":{"current":%[1]f},"smart_status":{"passed":false}}`, temperature)),
+		smartErr:    fmt.Errorf("smartctl exited with status 8"),
+	}}
+
+	disks, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disks[0].TemperatureCelsius == nil || *disks[0].TemperatureCelsius != temperature {
+		t.Fatalf("temperature = %#v, want %v", disks[0].TemperatureCelsius, temperature)
+	}
+	if disks[0].SmartHealth == nil || *disks[0].SmartHealth {
+		t.Fatalf("smart health = %#v, want false", disks[0].SmartHealth)
+	}
+}
+
+func TestListFallsBackToATAAttributeTemperature(t *testing.T) {
+	manager := &Manager{runner: smartMetadataRunner{
+		lsblkOutput: []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","size":1000,"mountpoints":[null]}]}`),
+		smartOutput: []byte(`{"ata_smart_attributes":{"table":[{"id":194,"raw":{"value":37}}]}}`),
+	}}
+
+	disks, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disks[0].TemperatureCelsius == nil || *disks[0].TemperatureCelsius != 37 {
+		t.Fatalf("temperature = %#v, want 37", disks[0].TemperatureCelsius)
+	}
+}

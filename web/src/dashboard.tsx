@@ -199,7 +199,34 @@ export function Dashboard({
                           : t("dashboard.available")}
                     </span>
                   </div>
-                  <div className="mt-5 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+                  <div className="mt-5 grid grid-cols-2 gap-4 text-sm sm:hidden">
+                    <Metric
+                      label={t("dashboard.capacity")}
+                      value={formatBytes(disk.sizeBytes)}
+                    />
+                    <Metric
+                      label={t("dashboard.transport")}
+                      value={disk.transport || t("dashboard.unknown")}
+                    />
+                    <TemperatureMetric temperature={disk.temperatureCelsius} />
+                    <SmartMetric health={disk.smartHealth} />
+                  </div>
+                  <details className="mt-4 sm:hidden">
+                    <summary className="cursor-pointer text-sm text-cyan-300 hover:text-cyan-200">
+                      {t("dashboard.showMore")}
+                    </summary>
+                    <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
+                      <Metric
+                        label={t("dashboard.partitionTable")}
+                        value={disk.partitioning || t("dashboard.none")}
+                      />
+                      <Metric
+                        label={t("dashboard.partitions")}
+                        value={String(partitions.length)}
+                      />
+                    </div>
+                  </details>
+                  <div className="mt-5 hidden grid-cols-6 gap-4 text-sm sm:grid">
                     <Metric
                       label={t("dashboard.capacity")}
                       value={formatBytes(disk.sizeBytes)}
@@ -216,6 +243,8 @@ export function Dashboard({
                       label={t("dashboard.partitions")}
                       value={String(partitions.length)}
                     />
+                    <TemperatureMetric temperature={disk.temperatureCelsius} />
+                    <SmartMetric health={disk.smartHealth} />
                   </div>
                   {!disk.usb && (
                     <div className="mt-5 flex flex-wrap gap-2">
@@ -842,12 +871,64 @@ function ErrorText({ error }: { error: Error }) {
     <>{t(`errors.${code}`, { defaultValue: t("errors.internal_error") })}</>
   );
 }
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({
+  label,
+  value,
+  valueClassName = "text-slate-200",
+}: {
+  label: string;
+  value: string;
+  valueClassName?: string;
+}) {
   return (
     <div>
       <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="mt-1 text-slate-200">{value}</p>
+      <p className={`mt-1 ${valueClassName}`}>{value}</p>
     </div>
+  );
+}
+function TemperatureMetric({ temperature }: { temperature?: number }) {
+  const { t } = useTranslation();
+  const color =
+    temperature === undefined
+      ? "text-slate-400"
+      : temperature >= 60
+        ? "text-rose-300"
+        : temperature >= 50
+          ? "text-amber-300"
+          : "text-emerald-300";
+  return (
+    <Metric
+      label={t("dashboard.temperature")}
+      value={
+        temperature === undefined
+          ? "-- °C"
+          : `${Math.round(temperature)} °C`
+      }
+      valueClassName={color}
+    />
+  );
+}
+function SmartMetric({ health }: { health?: boolean }) {
+  const { t } = useTranslation();
+  const color =
+    health === undefined
+      ? "text-slate-400"
+      : health
+        ? "text-emerald-300"
+        : "text-rose-300";
+  return (
+    <Metric
+      label="SMART"
+      value={
+        health === undefined
+          ? t("dashboard.unknown")
+          : health
+            ? t("dashboard.smartHealthy")
+            : t("dashboard.smartFailed")
+      }
+      valueClassName={color}
+    />
   );
 }
 function ActionButton({
