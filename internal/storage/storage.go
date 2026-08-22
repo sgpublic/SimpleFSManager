@@ -28,6 +28,7 @@ type Partition struct {
 	SizeBytes                 uint64           `json:"sizeBytes"`
 	FileSystem                string           `json:"fileSystem"`
 	UUID                      string           `json:"uuid"`
+	MountPath                 string           `json:"mountPath,omitempty"`
 	Mountpoints               []string         `json:"mountpoints"`
 	Usage                     *FileSystemUsage `json:"usage,omitempty"`
 	Zoned                     string           `json:"zoned,omitempty"`

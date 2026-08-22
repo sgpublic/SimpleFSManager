@@ -60,6 +60,70 @@ func (s *Store) RegisterVolume(ctx context.Context, uuid, serial string, partiti
 	return volume, true, nil
 }
 
+// ConfigureVolume creates or updates the persistent mount path for a volume.
+// It does not mount the filesystem.
+func (s *Store) ConfigureVolume(ctx context.Context, uuid, serial string, partitionNumber int, mountPath string) (Volume, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Volume{}, fmt.Errorf("begin volume configuration: %w", err)
+	}
+	defer tx.Rollback()
+
+	volume, err := scanVolume(tx.QueryRowContext(ctx, `
+		SELECT uuid, mount_number, mount_path, auto_mount, device_serial, partition_number
+		FROM volumes WHERE uuid = ?`, uuid))
+	if err == nil {
+		var usedByOther bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM volumes WHERE mount_path = ? AND uuid <> ?)`, mountPath, uuid).Scan(&usedByOther); err != nil {
+			return Volume{}, fmt.Errorf("check volume mount path: %w", err)
+		}
+		if usedByOther {
+			return Volume{}, fmt.Errorf("mount path %s is already configured", mountPath)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE volumes SET mount_path = ?, auto_mount = 1 WHERE uuid = ?`, mountPath, uuid); err != nil {
+			return Volume{}, fmt.Errorf("update volume mount path: %w", err)
+		}
+		volume.MountPath = mountPath
+		volume.AutoMount = true
+		if err := tx.Commit(); err != nil {
+			return Volume{}, fmt.Errorf("commit volume configuration: %w", err)
+		}
+		return volume, nil
+	}
+	if err != sql.ErrNoRows {
+		return Volume{}, fmt.Errorf("query volume configuration: %w", err)
+	}
+
+	var mountNumber int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(mount_number), 0) + 1 FROM volumes`).Scan(&mountNumber); err != nil {
+		return Volume{}, fmt.Errorf("allocate mount number: %w", err)
+	}
+	var used bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM volumes WHERE mount_path = ?)`, mountPath).Scan(&used); err != nil {
+		return Volume{}, fmt.Errorf("check volume mount path: %w", err)
+	}
+	if used {
+		return Volume{}, fmt.Errorf("mount path %s is already configured", mountPath)
+	}
+	volume = Volume{
+		UUID:         uuid,
+		MountNumber:  mountNumber,
+		MountPath:    mountPath,
+		AutoMount:    true,
+		DeviceSerial: serial,
+		PartitionNum: partitionNumber,
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO volumes (uuid, device_serial, partition_number, mount_number, mount_path, auto_mount)
+		VALUES (?, ?, ?, ?, ?, 1)`, volume.UUID, volume.DeviceSerial, volume.PartitionNum, volume.MountNumber, volume.MountPath); err != nil {
+		return Volume{}, fmt.Errorf("insert configured volume: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Volume{}, fmt.Errorf("commit volume configuration: %w", err)
+	}
+	return volume, nil
+}
+
 func (s *Store) VolumeByUUID(ctx context.Context, uuid string) (Volume, error) {
 	volume, err := scanVolume(s.DB.QueryRowContext(ctx, `
 		SELECT uuid, mount_number, mount_path, auto_mount, device_serial, partition_number

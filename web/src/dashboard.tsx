@@ -24,13 +24,18 @@ type ConfirmDialog = {
   operation: Operation;
 };
 type FormatDialog = { kind: "format"; target: string };
+type MountPathDialog = {
+  kind: "mountPath";
+  target: string;
+  currentPath: string;
+};
 type CreateDialog = {
   kind: "create";
   target: string;
   maxGiB: number;
   zoneSizeBytes?: number;
 };
-type Dialog = ConfirmDialog | FormatDialog | CreateDialog;
+type Dialog = ConfirmDialog | FormatDialog | MountPathDialog | CreateDialog;
 
 class ApiError extends Error {
   constructor(public code: string) {
@@ -364,6 +369,9 @@ export function Dashboard({
                                 {partition.fileSystem ||
                                   t("dashboard.unformatted")}{" "}
                                 · {formatBytes(partition.sizeBytes)}
+                                {partition.mountPath
+                                  ? ` · ${partition.mountPath}`
+                                  : ""}
                                 {partition.mountpoints?.length > 0
                                   ? ` · ${partition.mountpoints.join(", ")}`
                                   : ""}
@@ -416,9 +424,16 @@ export function Dashboard({
                                 <ManagedPartitionActions
                                   diskPath={disk.path}
                                   partition={partition}
-                                  system={disk.system}
-                                  confirm={confirm}
-                                  openFormat={(target) =>
+                                   system={disk.system}
+                                   confirm={confirm}
+                                   openMountPath={(target, currentPath) =>
+                                     setDialog({
+                                       kind: "mountPath",
+                                       target,
+                                       currentPath,
+                                     })
+                                   }
+                                   openFormat={(target) =>
                                     setDialog({ kind: "format", target })
                                   }
                                 />
@@ -552,6 +567,7 @@ function ManagedPartitionActions({
   partition,
   system,
   confirm,
+  openMountPath,
   openFormat,
 }: {
   diskPath: string;
@@ -560,6 +576,7 @@ function ManagedPartitionActions({
     number: number;
     uuid: string;
     fileSystem: string;
+    mountPath?: string;
     mountpoints: string[];
   };
   system: boolean;
@@ -568,30 +585,30 @@ function ManagedPartitionActions({
     title: string,
     next: (confirmation: string) => Operation,
   ) => void;
+  openMountPath: (target: string, currentPath: string) => void;
   openFormat: (target: string) => void;
 }) {
   const { t } = useTranslation();
-  if (
-    partition.mountpoints?.some((path) => path.startsWith("/vol")) &&
-    partition.uuid
-  )
+  if (partition.mountpoints?.length > 0)
     return (
-      <ActionButton
-        onClick={() =>
-          confirm(partition.uuid, t("dashboard.unmount"), (confirmation) => ({
-            path: "/api/volumes/unmount",
-            body: { uuid: partition.uuid, confirm: confirmation },
-          }))
-        }
-      >
-        {t("dashboard.unmount")}
-      </ActionButton>
+      partition.mountPath && partition.mountpoints.includes(partition.mountPath) ? (
+        <ActionButton
+          onClick={() =>
+            confirm(partition.uuid, t("dashboard.unmount"), (confirmation) => ({
+              path: "/api/volumes/unmount",
+              body: { uuid: partition.uuid, confirm: confirmation },
+            }))
+          }
+        >
+          {t("dashboard.unmount")}
+        </ActionButton>
+      ) : null
     );
   if (system || partition.mountpoints?.length > 0) return null;
   return (
     <>
       <>
-        {partition.fileSystem && (
+        {partition.fileSystem && partition.mountPath && (
           <ActionButton
             onClick={() =>
               confirm(partition.path, t("dashboard.mount"), (confirmation) => ({
@@ -601,6 +618,15 @@ function ManagedPartitionActions({
             }
           >
             {t("dashboard.mount")}
+          </ActionButton>
+        )}
+        {partition.fileSystem && (
+          <ActionButton
+            onClick={() =>
+              openMountPath(partition.path, partition.mountPath ?? "")
+            }
+          >
+            {t("dashboard.modifyMountPath")}
           </ActionButton>
         )}
       </>
@@ -647,7 +673,14 @@ function OperationDialog({
   const [partitionMode, setPartitionMode] = useState<"largest" | "manual">(
     "largest",
   );
+  const [mountPath, setMountPath] = useState("");
   const [seconds, setSeconds] = useState(5);
+  useEffect(() => {
+    if (dialog.kind === "mountPath") {
+      setMountPath(dialog.currentPath);
+    }
+    setSeconds(5);
+  }, [dialog]);
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !pending) onCancel();
@@ -668,6 +701,8 @@ function OperationDialog({
       ? t("dashboard.createPartition")
       : dialog.kind === "format"
         ? t("dashboard.format")
+        : dialog.kind === "mountPath"
+          ? t("dashboard.modifyMountPath")
         : dialog.title;
   const validSize =
     Number.isFinite(Number(size)) &&
@@ -680,6 +715,7 @@ function OperationDialog({
   const canSubmit =
     seconds === 0 &&
     (dialog.kind !== "create" || partitionMode === "largest" || validSize) &&
+    (dialog.kind !== "mountPath" || mountPath.trim().length > 0) &&
     !pending;
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -704,6 +740,15 @@ function OperationDialog({
               : Math.round(Number(size) * 1024 ** 3),
           useLargestFree: partitionMode === "largest",
           name,
+         confirm: dialog.target,
+        },
+      });
+    if (dialog.kind === "mountPath")
+      onSubmit({
+        path: "/api/volumes/mount-path",
+        body: {
+          partitionPath: dialog.target,
+          mountPath: mountPath.trim(),
           confirm: dialog.target,
         },
       });
@@ -748,6 +793,22 @@ function OperationDialog({
           <p className="text-sm leading-6 text-slate-400">
             {t("dialog.warning")}
           </p>
+          {dialog.kind === "mountPath" && (
+            <label className="block text-sm text-slate-300">
+              {t("dialog.mountPath")}
+              <input
+                className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-slate-100 outline-none focus:border-cyan-400"
+                value={mountPath}
+                onChange={(event) => setMountPath(event.target.value)}
+                disabled={pending}
+                placeholder="/mnt/data"
+                required
+              />
+              <span className="mt-1 block text-xs text-slate-500">
+                {t("dialog.mountPathHint")}
+              </span>
+            </label>
+          )}
           {dialog.kind === "format" && (
             <fieldset>
               <legend className="text-sm font-medium text-slate-200">

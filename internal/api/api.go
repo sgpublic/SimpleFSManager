@@ -92,6 +92,14 @@ type MountInput struct {
 	}
 }
 
+type MountPathInput struct {
+	Body struct {
+		PartitionPath string `json:"partitionPath" minLength:"1"`
+		MountPath     string `json:"mountPath" minLength:"1"`
+		Confirm       string `json:"confirm" minLength:"1"`
+	}
+}
+
 type UnmountInput struct {
 	Body struct {
 		UUID    string `json:"uuid" minLength:"1"`
@@ -177,6 +185,22 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		found, err := disks.List(ctx)
 		if err != nil {
 			return nil, err
+		}
+		for diskIndex := range found {
+			for partitionIndex := range found[diskIndex].Partitions {
+				partition := &found[diskIndex].Partitions[partitionIndex]
+				if partition.UUID == "" {
+					continue
+				}
+				volume, err := database.VolumeByUUID(ctx, partition.UUID)
+				if err != nil {
+					if strings.Contains(err.Error(), "not found") {
+						continue
+					}
+					return nil, err
+				}
+				partition.MountPath = volume.MountPath
+			}
 		}
 		output := &DiskListOutput{}
 		output.Body.Disks = found
@@ -296,6 +320,17 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 			return nil, badRequest(err)
 		}
 		return operation("mounted volume", managed.MountPath, managed.UUID), nil
+	})
+
+	huma.Post(api, "/api/volumes/mount-path", func(ctx context.Context, input *MountPathInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.PartitionPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		managed, err := volumes.ConfigureMountPath(ctx, input.Body.PartitionPath, input.Body.MountPath)
+		if err != nil {
+			return nil, operationError(logger, "configure volume mount path", err, "partition", input.Body.PartitionPath, "mountPath", input.Body.MountPath)
+		}
+		return operation("configured volume mount path", managed.MountPath, managed.UUID), nil
 	})
 
 	huma.Post(api, "/api/volumes/unmount", func(ctx context.Context, input *UnmountInput) (*OperationOutput, error) {
@@ -435,6 +470,12 @@ func errorCode(err error) string {
 		return "partition_not_found"
 	case strings.Contains(message, "unsupported filesystem"):
 		return "unsupported_filesystem"
+	case strings.Contains(message, "mount path is not configured"):
+		return "mount_path_not_configured"
+	case strings.Contains(message, "already configured"):
+		return "mount_path_in_use"
+	case strings.Contains(message, "invalid mount path"):
+		return "invalid_mount_path"
 	case strings.Contains(message, "SMART") || strings.Contains(message, "smartctl"):
 		return "smart_query_failed"
 	case strings.Contains(message, "zoned partition size"):

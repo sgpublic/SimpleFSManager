@@ -47,6 +47,19 @@ func TestVolumePath(t *testing.T) {
 	}
 }
 
+func TestValidateMountPath(t *testing.T) {
+	for _, path := range []string{"/vol1", "/mnt/archive", "/home/user/data"} {
+		if err := ValidateMountPath(path); err != nil {
+			t.Errorf("ValidateMountPath(%q) = %v", path, err)
+		}
+	}
+	for _, path := range []string{"", "/", "relative", "/mnt/../etc", "/etc/data", "/proc/data"} {
+		if err := ValidateMountPath(path); err == nil {
+			t.Errorf("ValidateMountPath(%q) succeeded", path)
+		}
+	}
+}
+
 func TestPostorderProcessesLeafStorageBeforeItsParents(t *testing.T) {
 	devices := postorder(lsblkDevice{Children: []lsblkDevice{{Name: "sdb1", Type: "part", Children: []lsblkDevice{{Name: "md0", Type: "raid1", Children: []lsblkDevice{{Name: "legacy", Type: "lvm"}}}}}}})
 	if len(devices) != 3 || devices[0].Name != "legacy" || devices[1].Name != "md0" || devices[2].Name != "sdb1" {

@@ -30,17 +30,34 @@ func (m *Manager) Mount(ctx context.Context, partitionPath string) (store.Volume
 	if partition.UUID == "" || partition.FileSystem == "" {
 		return store.Volume{}, fmt.Errorf("%s must be formatted before mounting", partitionPath)
 	}
-	volume, created, err := m.store.RegisterVolume(ctx, partition.UUID, diskIdentity(disk), partition.Number)
+	volume, err := m.store.VolumeByUUID(ctx, partition.UUID)
 	if err != nil {
-		return store.Volume{}, err
+		return store.Volume{}, fmt.Errorf("mount path is not configured for %s", partitionPath)
 	}
 	if err := m.storage.Mount(ctx, partitionPath, volume.MountPath, partition.FileSystem); err != nil {
-		if created {
-			_ = m.store.DeleteVolume(ctx, volume.UUID)
-		}
 		return store.Volume{}, err
 	}
 	return volume, nil
+}
+
+func (m *Manager) ConfigureMountPath(ctx context.Context, partitionPath, mountPath string) (store.Volume, error) {
+	disk, partition, err := m.storage.Partition(ctx, partitionPath)
+	if err != nil {
+		return store.Volume{}, err
+	}
+	if disk.USB {
+		return store.Volume{}, fmt.Errorf("USB storage is managed at /usbXY")
+	}
+	if partition.UUID == "" || partition.FileSystem == "" {
+		return store.Volume{}, fmt.Errorf("%s must be formatted before setting a mount path", partitionPath)
+	}
+	if len(partition.Mountpoints) > 0 {
+		return store.Volume{}, fmt.Errorf("refusing to change mount path for mounted partition %s", partitionPath)
+	}
+	if err := storage.ValidateMountPath(mountPath); err != nil {
+		return store.Volume{}, fmt.Errorf("invalid mount path: %w", err)
+	}
+	return m.store.ConfigureVolume(ctx, partition.UUID, diskIdentity(disk), partition.Number, mountPath)
 }
 
 func (m *Manager) Unmount(ctx context.Context, uuid string) (store.Volume, error) {

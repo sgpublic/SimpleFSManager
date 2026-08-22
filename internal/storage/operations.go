@@ -20,6 +20,20 @@ import (
 var volumePath = regexp.MustCompile(`^/vol[1-9][0-9]*$`)
 var usbPath = regexp.MustCompile(`^/usb[a-z][a-z]$`)
 
+// ValidateMountPath accepts application-managed absolute directories while
+// excluding paths that are part of the operating system's live namespace.
+func ValidateMountPath(target string) error {
+	if target == "" || !filepath.IsAbs(target) || filepath.Clean(target) != target || target == "/" {
+		return fmt.Errorf("mount path must be a clean absolute path other than /")
+	}
+	for _, prefix := range []string{"/boot", "/dev", "/etc", "/proc", "/run", "/sys", "/usr"} {
+		if target == prefix || strings.HasPrefix(target, prefix+"/") {
+			return fmt.Errorf("mount path is reserved by the operating system")
+		}
+	}
+	return nil
+}
+
 // InitializeGPT replaces the target disk's partition table with an empty GPT.
 // The caller must obtain explicit user confirmation before calling this method.
 func (m *Manager) InitializeGPT(ctx context.Context, diskPath string) (bool, error) {
@@ -229,8 +243,10 @@ func (m *Manager) Mount(ctx context.Context, partitionPath, target, filesystem s
 	if !managedFilesystem(filesystem) {
 		return fmt.Errorf("unsupported filesystem %q", filesystem)
 	}
-	if !volumePath.MatchString(target) && !usbPath.MatchString(target) {
-		return fmt.Errorf("mount target must be /volN or /usbXY")
+	if usbPath.MatchString(target) {
+		// USB targets are assigned by the USB manager.
+	} else if err := ValidateMountPath(target); err != nil {
+		return fmt.Errorf("invalid mount path: %w", err)
 	}
 	if err := m.ensureUnusedPartition(ctx, partitionPath, true); err != nil {
 		return err
@@ -245,8 +261,10 @@ func (m *Manager) Mount(ctx context.Context, partitionPath, target, filesystem s
 }
 
 func (m *Manager) Unmount(target string) error {
-	if !volumePath.MatchString(target) && !usbPath.MatchString(target) {
-		return fmt.Errorf("mount target must be /volN or /usbXY")
+	if !usbPath.MatchString(target) {
+		if err := ValidateMountPath(target); err != nil {
+			return fmt.Errorf("invalid mount path: %w", err)
+		}
 	}
 	if err := unix.Unmount(target, 0); err != nil {
 		return fmt.Errorf("unmount %s: %w", target, err)

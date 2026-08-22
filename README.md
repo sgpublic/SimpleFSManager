@@ -20,7 +20,7 @@ Single-user Linux disk management UI for physical disks, GPT partition tables, e
 
 A disk is treated as the system disk when it contains a mounted partition whose UUID is not registered in this project's SQLite database. A whole-disk mount is also always treated as a system disk. System disks are never eligible for format or partition changes. This assumes, by design, that only the system disk is mounted through `/etc/fstab`.
 
-The first successful mount registers its filesystem UUID in SQLite and allocates the next permanent `/volN` path. At startup and on udev events, only these registered UUIDs are restored; `/etc/fstab` is never modified or read.
+Formatted internal partitions must have an application-managed mount path configured before they can be mounted. Existing volumes keep their persisted `/volN` paths for compatibility; new volumes may use another clean absolute path. At startup and on udev events, only configured auto-mount volumes are restored; `/etc/fstab` is never modified or read.
 
 USB storage (`lsblk TRAN=usb`) uses a separate transient mount space. Attached devices receive insertion-order letters and supported ext4/xfs partitions are automatically mounted at `/usb<device-letter><partition-letter>`, for example `/usbaa` and `/usbab`. Removing a USB device releases its letter for the next device; USB storage only supports mount and unmount.
 
