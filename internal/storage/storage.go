@@ -22,32 +22,38 @@ type FileSystemUsage struct {
 }
 
 type Partition struct {
-	Path        string           `json:"path"`
-	Name        string           `json:"name"`
-	Number      int              `json:"number"`
-	SizeBytes   uint64           `json:"sizeBytes"`
-	FileSystem  string           `json:"fileSystem"`
-	UUID        string           `json:"uuid"`
-	Mountpoints []string         `json:"mountpoints"`
-	Usage       *FileSystemUsage `json:"usage,omitempty"`
+	Path                      string           `json:"path"`
+	Name                      string           `json:"name"`
+	Number                    int              `json:"number"`
+	SizeBytes                 uint64           `json:"sizeBytes"`
+	FileSystem                string           `json:"fileSystem"`
+	UUID                      string           `json:"uuid"`
+	Mountpoints               []string         `json:"mountpoints"`
+	Usage                     *FileSystemUsage `json:"usage,omitempty"`
+	Zoned                     string           `json:"zoned,omitempty"`
+	ZoneSizeBytes             uint64           `json:"zoneSizeBytes,omitempty"`
+	ZoneWriteGranularityBytes uint64           `json:"zoneWriteGranularityBytes,omitempty"`
 }
 
 type Disk struct {
-	Path               string      `json:"path"`
-	Name               string      `json:"name"`
-	Model              string      `json:"model"`
-	Serial             string      `json:"serial"`
-	SizeBytes          uint64      `json:"sizeBytes"`
-	Partitioning       string      `json:"partitioning"`
-	Transport          string      `json:"transport"`
-	USB                bool        `json:"usb"`
-	Protected          bool        `json:"protected"`
-	System             bool        `json:"system"`
-	Reclaimable        bool        `json:"reclaimable"`
-	TemperatureCelsius *float64    `json:"temperatureCelsius,omitempty"`
-	SmartHealth        *bool       `json:"smartHealth,omitempty"`
-	Mountpoints        []string    `json:"mountpoints"`
-	Partitions         []Partition `json:"partitions"`
+	Path                      string      `json:"path"`
+	Name                      string      `json:"name"`
+	Model                     string      `json:"model"`
+	Serial                    string      `json:"serial"`
+	SizeBytes                 uint64      `json:"sizeBytes"`
+	Partitioning              string      `json:"partitioning"`
+	Transport                 string      `json:"transport"`
+	USB                       bool        `json:"usb"`
+	Protected                 bool        `json:"protected"`
+	System                    bool        `json:"system"`
+	Reclaimable               bool        `json:"reclaimable"`
+	TemperatureCelsius        *float64    `json:"temperatureCelsius,omitempty"`
+	SmartHealth               *bool       `json:"smartHealth,omitempty"`
+	Mountpoints               []string    `json:"mountpoints"`
+	Partitions                []Partition `json:"partitions"`
+	Zoned                     string      `json:"zoned,omitempty"`
+	ZoneSizeBytes             uint64      `json:"zoneSizeBytes,omitempty"`
+	ZoneWriteGranularityBytes uint64      `json:"zoneWriteGranularityBytes,omitempty"`
 }
 
 type commandRunner interface {

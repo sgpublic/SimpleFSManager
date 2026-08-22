@@ -23,7 +23,12 @@ type ConfirmDialog = {
   operation: Operation;
 };
 type FormatDialog = { kind: "format"; target: string };
-type CreateDialog = { kind: "create"; target: string; maxGiB: number };
+type CreateDialog = {
+  kind: "create";
+  target: string;
+  maxGiB: number;
+  zoneSizeBytes?: number;
+};
 type Dialog = ConfirmDialog | FormatDialog | CreateDialog;
 
 class ApiError extends Error {
@@ -220,13 +225,19 @@ export function Dashboard({
                         label={t("dashboard.partitionTable")}
                         value={disk.partitioning || t("dashboard.none")}
                       />
+                      {disk.zoned && disk.zoned !== "none" && (
+                        <Metric
+                          label={t("dashboard.zoned")}
+                          value={`${disk.zoned} · ${formatBytes(disk.zoneSizeBytes ?? 0)}`}
+                        />
+                      )}
                       <Metric
                         label={t("dashboard.partitions")}
                         value={String(partitions.length)}
                       />
                     </div>
                   </details>
-                  <div className="mt-5 hidden grid-cols-6 gap-4 text-sm sm:grid">
+                  <div className="mt-5 hidden grid-cols-7 gap-4 text-sm sm:grid">
                     <Metric
                       label={t("dashboard.capacity")}
                       value={formatBytes(disk.sizeBytes)}
@@ -238,6 +249,14 @@ export function Dashboard({
                     <Metric
                       label={t("dashboard.partitionTable")}
                       value={disk.partitioning || t("dashboard.none")}
+                    />
+                    <Metric
+                      label={t("dashboard.zoned")}
+                      value={
+                        disk.zoned && disk.zoned !== "none"
+                          ? `${disk.zoned} · ${formatBytes(disk.zoneSizeBytes ?? 0)}`
+                          : t("dashboard.none")
+                      }
                     />
                     <Metric
                       label={t("dashboard.partitions")}
@@ -296,6 +315,7 @@ export function Dashboard({
                                       1,
                                       Math.floor(disk.sizeBytes / 1024 ** 3),
                                     ),
+                                    zoneSizeBytes: disk.zoneSizeBytes,
                                   })
                                 }
                               >
@@ -603,7 +623,9 @@ function OperationDialog({
   onSubmit: (operation: Operation) => void;
 }) {
   const { t } = useTranslation();
-  const [filesystem, setFilesystem] = useState<"ext4" | "xfs">("ext4");
+  const [filesystem, setFilesystem] = useState<
+    "ext4" | "xfs" | "btrfs" | "f2fs"
+  >("ext4");
   const [size, setSize] = useState(() =>
     dialog.kind === "create" ? String(Math.min(100, dialog.maxGiB)) : "100",
   );
@@ -636,7 +658,11 @@ function OperationDialog({
   const validSize =
     Number.isFinite(Number(size)) &&
     Number(size) > 0 &&
-    (dialog.kind !== "create" || Number(size) <= dialog.maxGiB);
+    (dialog.kind !== "create" ||
+      (Number(size) <= dialog.maxGiB &&
+        (!dialog.zoneSizeBytes ||
+          Math.round(Number(size) * 1024 ** 3) % dialog.zoneSizeBytes ===
+            0)));
   const canSubmit =
     seconds === 0 &&
     (dialog.kind !== "create" || partitionMode === "largest" || validSize) &&
@@ -714,7 +740,7 @@ function OperationDialog({
                 {t("dialog.filesystem")}
               </legend>
               <div className="mt-2 grid grid-cols-2 gap-3">
-                {(["ext4", "xfs"] as const).map((value) => (
+                {(["ext4", "xfs", "btrfs", "f2fs"] as const).map((value) => (
                   <label
                     key={value}
                     className={`cursor-pointer rounded-lg border px-3 py-3 text-sm ${filesystem === value ? "border-cyan-400 bg-cyan-400/10 text-cyan-200" : "border-slate-700 text-slate-300"}`}
@@ -810,6 +836,13 @@ function OperationDialog({
                   maxLength={36}
                 />
               </label>
+              {dialog.zoneSizeBytes && (
+                <p className="text-xs leading-5 text-amber-300">
+                  {t("dashboard.zonedPartitionHint", {
+                    size: formatBytes(dialog.zoneSizeBytes),
+                  })}
+                </p>
+              )}
             </>
           )}
           <div className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-cyan-200 break-all">

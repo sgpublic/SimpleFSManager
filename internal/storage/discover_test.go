@@ -98,6 +98,27 @@ func TestListReturnsPhysicalDisksAndFallsBackToBlkid(t *testing.T) {
 	}
 }
 
+func TestListReportsZonedGeometry(t *testing.T) {
+	manager := &Manager{runner: fakeRunner{run: func(name string, _ ...string) ([]byte, error) {
+		if name != "lsblk" {
+			return nil, fmt.Errorf("unexpected command %s", name)
+		}
+		return []byte(`{"blockdevices":[{"name":"zns0","path":"/dev/nvme0n1","type":"disk","size":100000,"zoned":"host-managed","zone-sz":268435456,"zone-wgran":4096,"mountpoints":[null],"children":[{"name":"nvme0n1p1","path":"/dev/nvme0n1p1","type":"part","size":90000,"zoned":"host-managed","zone-sz":268435456,"zone-wgran":4096,"mountpoints":[null]}]}]}`), nil
+	}}}
+
+	disks, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disks[0].Zoned != "host-managed" || disks[0].ZoneSizeBytes != 268435456 || disks[0].ZoneWriteGranularityBytes != 4096 {
+		t.Fatalf("disk zoned metadata = %#v", disks[0])
+	}
+	partition := disks[0].Partitions[0]
+	if partition.Zoned != "host-managed" || partition.ZoneSizeBytes != 268435456 || partition.ZoneWriteGranularityBytes != 4096 {
+		t.Fatalf("partition zoned metadata = %#v", partition)
+	}
+}
+
 func TestListMarksInactiveRAIDAndLVMStackReclaimable(t *testing.T) {
 	manager := &Manager{runner: fakeRunner{run: func(name string, _ ...string) ([]byte, error) {
 		if name != "lsblk" {

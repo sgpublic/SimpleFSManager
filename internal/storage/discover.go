@@ -18,18 +18,21 @@ type lsblkOutput struct {
 }
 
 type lsblkDevice struct {
-	Name        string        `json:"name"`
-	Path        string        `json:"path"`
-	Type        string        `json:"type"`
-	Size        uint64        `json:"size"`
-	Model       string        `json:"model"`
-	Serial      string        `json:"serial"`
-	Transport   string        `json:"tran"`
-	PTType      string        `json:"pttype"`
-	FSType      string        `json:"fstype"`
-	UUID        string        `json:"uuid"`
-	Mountpoints []*string     `json:"mountpoints"`
-	Children    []lsblkDevice `json:"children"`
+	Name                 string        `json:"name"`
+	Path                 string        `json:"path"`
+	Type                 string        `json:"type"`
+	Size                 uint64        `json:"size"`
+	Model                string        `json:"model"`
+	Serial               string        `json:"serial"`
+	Transport            string        `json:"tran"`
+	PTType               string        `json:"pttype"`
+	FSType               string        `json:"fstype"`
+	UUID                 string        `json:"uuid"`
+	Mountpoints          []*string     `json:"mountpoints"`
+	Children             []lsblkDevice `json:"children"`
+	Zoned                string        `json:"zoned"`
+	ZoneSize             uint64        `json:"zone-sz"`
+	ZoneWriteGranularity uint64        `json:"zone-wgran"`
 }
 
 type smartctlOutput struct {
@@ -50,7 +53,7 @@ type smartctlOutput struct {
 }
 
 func (m *Manager) List(ctx context.Context) ([]Disk, error) {
-	output, err := m.runner.Run(ctx, "lsblk", "--json", "--bytes", "--output", "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,PTTYPE,FSTYPE,UUID,MOUNTPOINTS")
+	output, err := m.runner.Run(ctx, "lsblk", "--json", "--bytes", "--zoned", "--output", "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,PTTYPE,FSTYPE,UUID,MOUNTPOINTS,ZONED,ZONE-SZ,ZONE-WGRAN")
 	if err != nil {
 		return nil, fmt.Errorf("list block devices: %w", err)
 	}
@@ -66,16 +69,19 @@ func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 			continue
 		}
 		disk := Disk{
-			Path:         device.Path,
-			Name:         device.Name,
-			Model:        strings.TrimSpace(device.Model),
-			Serial:       strings.TrimSpace(device.Serial),
-			Transport:    strings.TrimSpace(device.Transport),
-			USB:          strings.EqualFold(strings.TrimSpace(device.Transport), "usb"),
-			SizeBytes:    device.Size,
-			Partitioning: device.PTType,
-			Mountpoints:  mountpoints(device.Mountpoints),
-			Partitions:   make([]Partition, 0),
+			Path:                      device.Path,
+			Name:                      device.Name,
+			Model:                     strings.TrimSpace(device.Model),
+			Serial:                    strings.TrimSpace(device.Serial),
+			Transport:                 strings.TrimSpace(device.Transport),
+			USB:                       strings.EqualFold(strings.TrimSpace(device.Transport), "usb"),
+			SizeBytes:                 device.Size,
+			Partitioning:              device.PTType,
+			Mountpoints:               mountpoints(device.Mountpoints),
+			Partitions:                make([]Partition, 0),
+			Zoned:                     device.Zoned,
+			ZoneSizeBytes:             device.ZoneSize,
+			ZoneWriteGranularityBytes: device.ZoneWriteGranularity,
 		}
 		disk.TemperatureCelsius, disk.SmartHealth = m.smartMetadata(ctx, disk.Path)
 		disk.Protected = len(disk.Mountpoints) > 0
@@ -86,13 +92,16 @@ func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 				continue
 			}
 			partition := Partition{
-				Path:        child.Path,
-				Name:        child.Name,
-				Number:      number(child.Name),
-				SizeBytes:   child.Size,
-				FileSystem:  child.FSType,
-				UUID:        child.UUID,
-				Mountpoints: mountpoints(child.Mountpoints),
+				Path:                      child.Path,
+				Name:                      child.Name,
+				Number:                    number(child.Name),
+				SizeBytes:                 child.Size,
+				FileSystem:                child.FSType,
+				UUID:                      child.UUID,
+				Mountpoints:               mountpoints(child.Mountpoints),
+				Zoned:                     child.Zoned,
+				ZoneSizeBytes:             child.ZoneSize,
+				ZoneWriteGranularityBytes: child.ZoneWriteGranularity,
 			}
 			if partition.FileSystem == "" || partition.UUID == "" {
 				m.fillBlockMetadata(ctx, &partition)

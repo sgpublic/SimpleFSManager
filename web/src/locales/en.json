@@ -49,7 +49,10 @@
     "delete": "Delete",
     "reclaim": "Reclaim and erase disk",
     "rebootRequired": "The GPT was written, but the system must restart before the new partition table can be used.",
-    "restartSystem": "Restart system"
+    "restartSystem": "Restart system",
+    "zoned": "Zoned model",
+    "zoneSize": "Zone size",
+    "zonedPartitionHint": "This is a zoned device. Partition size must be a multiple of {{size}}."
   },
   "dialog": {
     "irreversible": "Irreversible operation",
@@ -84,7 +87,8 @@
     "invalid_partition": "The selected device is not an eligible physical disk partition.",
     "invalid_partition_table": "The disk does not have a GPT partition table.",
     "partition_not_found": "The selected partition does not exist.",
-    "unsupported_filesystem": "Only ext4 and xfs are supported.",
+    "unsupported_filesystem": "Only ext4, xfs, btrfs, and f2fs are supported.",
+    "invalid_zoned_partition_size": "The partition size on a zoned disk must be a multiple of the zone size.",
     "unformatted_partition": "Format the partition before mounting it.",
     "insufficient_space": "There is not enough unallocated space for this partition.",
     "invalid_mount_target": "The mount target is invalid.",

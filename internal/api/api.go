@@ -80,7 +80,7 @@ type DeletePartitionInput struct {
 type FormatInput struct {
 	Body struct {
 		PartitionPath string `json:"partitionPath" minLength:"1"`
-		FileSystem    string `json:"fileSystem" enum:"ext4,xfs"`
+		FileSystem    string `json:"fileSystem" enum:"ext4,xfs,btrfs,f2fs"`
 		Confirm       string `json:"confirm" minLength:"1"`
 	}
 }
@@ -435,6 +435,8 @@ func errorCode(err error) string {
 		return "partition_not_found"
 	case strings.Contains(message, "unsupported filesystem"):
 		return "unsupported_filesystem"
+	case strings.Contains(message, "zoned partition size"):
+		return "invalid_zoned_partition_size"
 	case strings.Contains(message, "USB storage only supports") || strings.Contains(message, "USB storage is managed"):
 		return "usb_mutation_not_supported"
 	case strings.Contains(message, "not a USB partition"):

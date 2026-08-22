@@ -83,8 +83,9 @@ func (m *Manager) Reclaim(ctx context.Context, diskPath string) (bool, error) {
 }
 
 // CreatePartition allocates one Linux filesystem partition from an unused GPT
-// disk. sizeBytes is rounded up to the device's logical sector size. When
-// useLargestFree is true, it fills the largest contiguous unallocated region.
+// disk. On regular devices sizeBytes is rounded up to the logical sector size;
+// zoned devices require an exact zone-size multiple. When useLargestFree is
+// true, it fills the largest contiguous range of complete zones.
 func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeBytes uint64, useLargestFree bool, name string) (int, error) {
 	if sizeBytes == 0 && !useLargestFree {
 		return 0, fmt.Errorf("partition size must be greater than zero")
@@ -102,19 +103,36 @@ func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeByte
 		return 0, err
 	}
 
+	device, err := m.device(ctx, diskPath)
+	if err != nil {
+		disk.Close()
+		return 0, err
+	}
+	alignment := partitionAlignment(device, uint64(disk.LogicalBlocksize))
 	var start, end uint64
 	if useLargestFree {
 		var ok bool
-		start, end, ok = largestPartitionGap(table)
+		start, end, ok = largestPartitionGapAligned(table, alignment, isZoned(device))
 		if !ok {
 			disk.Close()
 			return 0, fmt.Errorf("not enough unallocated space")
 		}
 	} else {
 		sectorSize := uint64(disk.LogicalBlocksize)
+		if isZoned(device) && sizeBytes%(device.ZoneSize) != 0 {
+			disk.Close()
+			return 0, fmt.Errorf("zoned partition size must be a multiple of %d bytes", device.ZoneSize)
+		}
 		needed := (sizeBytes + sectorSize - 1) / sectorSize
+		if needed == 0 {
+			disk.Close()
+			return 0, fmt.Errorf("partition size must be greater than zero")
+		}
+		if isZoned(device) {
+			needed = alignSector(needed, alignment)
+		}
 		var ok bool
-		start, ok = nextPartitionStart(table, needed)
+		start, ok = nextPartitionStart(table, needed, alignment)
 		if !ok {
 			disk.Close()
 			return 0, fmt.Errorf("not enough unallocated space for %d bytes", sizeBytes)
@@ -194,6 +212,10 @@ func (m *Manager) Format(ctx context.Context, partitionPath, filesystem string) 
 		command, args = "mkfs.ext4", []string{"-F", partitionPath}
 	case "xfs":
 		command, args = "mkfs.xfs", []string{"-f", partitionPath}
+	case "btrfs":
+		command, args = "mkfs.btrfs", []string{"-f", partitionPath}
+	case "f2fs":
+		command, args = "mkfs.f2fs", []string{"-f", partitionPath}
 	default:
 		return fmt.Errorf("unsupported filesystem %q", filesystem)
 	}
@@ -204,7 +226,7 @@ func (m *Manager) Format(ctx context.Context, partitionPath, filesystem string) 
 }
 
 func (m *Manager) Mount(ctx context.Context, partitionPath, target, filesystem string) error {
-	if filesystem != "ext4" && filesystem != "xfs" {
+	if !managedFilesystem(filesystem) {
 		return fmt.Errorf("unsupported filesystem %q", filesystem)
 	}
 	if !volumePath.MatchString(target) && !usbPath.MatchString(target) {
@@ -245,7 +267,7 @@ func rereadPartitionTable(diskPath string) error {
 }
 
 func (m *Manager) device(ctx context.Context, diskPath string) (lsblkDevice, error) {
-	output, err := m.runner.Run(ctx, "lsblk", "--json", "--bytes", "--output", "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,PTTYPE,FSTYPE,UUID,MOUNTPOINTS")
+	output, err := m.runner.Run(ctx, "lsblk", "--json", "--bytes", "--zoned", "--output", "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,PTTYPE,FSTYPE,UUID,MOUNTPOINTS,ZONED,ZONE-SZ,ZONE-WGRAN")
 	if err != nil {
 		return lsblkDevice{}, fmt.Errorf("list block devices: %w", err)
 	}
@@ -331,11 +353,14 @@ func gptTable(device *diskpkg.Disk) (*gpt.Table, error) {
 	return gptTable, nil
 }
 
-func nextPartitionStart(table *gpt.Table, needed uint64) (uint64, bool) {
-	const alignment = uint64(2048)
+func nextPartitionStart(table *gpt.Table, needed uint64, alignments ...uint64) (uint64, bool) {
+	alignment := uint64(2048)
+	if len(alignments) > 0 {
+		alignment = alignments[0]
+	}
 	partitions := append([]*gpt.Partition(nil), table.Partitions...)
 	sort.Slice(partitions, func(i, j int) bool { return partitions[i].Start < partitions[j].Start })
-	start := alignment
+	start := alignSector(2048, alignment)
 	for _, partition := range partitions {
 		if start+needed-1 < partition.Start {
 			return start, true
@@ -347,15 +372,32 @@ func nextPartitionStart(table *gpt.Table, needed uint64) (uint64, bool) {
 	return start, start+needed-1 <= table.LastDataSector()
 }
 
-func largestPartitionGap(table *gpt.Table) (uint64, uint64, bool) {
+func largestPartitionGap(table *gpt.Table, alignments ...uint64) (uint64, uint64, bool) {
+	alignment := uint64(2048)
+	if len(alignments) > 0 {
+		alignment = alignments[0]
+	}
+	return largestPartitionGapAligned(table, alignment, false)
+}
+
+func largestPartitionGapAligned(table *gpt.Table, alignment uint64, zoneAligned bool) (uint64, uint64, bool) {
 	partitions := append([]*gpt.Partition(nil), table.Partitions...)
 	sort.Slice(partitions, func(i, j int) bool { return partitions[i].Start < partitions[j].Start })
-	const alignment = uint64(2048)
-	start := alignment
+	start := alignSector(2048, alignment)
 	var largestStart, largestEnd uint64
 	for _, partition := range partitions {
 		if partition.Start > start {
 			end := partition.Start - 1
+			if zoneAligned {
+				alignedEnd := alignSectorDown(partition.Start, alignment)
+				if alignedEnd == 0 {
+					continue
+				}
+				end = alignedEnd - 1
+			}
+			if end < start {
+				continue
+			}
 			if largestEnd < largestStart || end-start > largestEnd-largestStart {
 				largestStart, largestEnd = start, end
 			}
@@ -364,14 +406,40 @@ func largestPartitionGap(table *gpt.Table) (uint64, uint64, bool) {
 			start = alignSector(partition.End+1, alignment)
 		}
 	}
-	if start <= table.LastDataSector() && (largestEnd < largestStart || table.LastDataSector()-start > largestEnd-largestStart) {
-		largestStart, largestEnd = start, table.LastDataSector()
+	lastBoundary := table.LastDataSector() + 1
+	if zoneAligned {
+		lastBoundary = alignSectorDown(lastBoundary, alignment)
+	}
+	if lastBoundary > 0 {
+		lastEnd := lastBoundary - 1
+		if start <= lastEnd && (largestEnd < largestStart || lastEnd-start > largestEnd-largestStart) {
+			largestStart, largestEnd = start, lastEnd
+		}
 	}
 	return largestStart, largestEnd, largestEnd >= largestStart
 }
 
 func alignSector(value, alignment uint64) uint64 {
 	return (value + alignment - 1) / alignment * alignment
+}
+
+func alignSectorDown(value, alignment uint64) uint64 {
+	return value / alignment * alignment
+}
+
+func partitionAlignment(device lsblkDevice, sectorSize uint64) uint64 {
+	if !isZoned(device) || sectorSize == 0 {
+		return 2048
+	}
+	return device.ZoneSize / sectorSize
+}
+
+func isZoned(device lsblkDevice) bool {
+	return device.Zoned != "none" && device.ZoneSize > 0
+}
+
+func managedFilesystem(filesystem string) bool {
+	return filesystem == "ext4" || filesystem == "xfs" || filesystem == "btrfs" || filesystem == "f2fs"
 }
 
 func nextPartitionIndex(table *gpt.Table) int {

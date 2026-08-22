@@ -1,6 +1,6 @@
 # SimpleFSManager
 
-Single-user Linux disk management UI. The first release is intentionally limited to physical disks, GPT partition tables, ext4 filesystems, and application-managed mounts at `/volN`.
+Single-user Linux disk management UI for physical disks, GPT partition tables, ext4/xfs/btrfs/f2fs filesystems, and application-managed mounts at `/volN`.
 
 ## Current status
 
@@ -13,7 +13,7 @@ Single-user Linux disk management UI. The first release is intentionally limited
 - Live physical disk and partition discovery through `lsblk --json`, with `blkid` fallback for UUID and filesystem type
 - SMART health and temperature discovery through `smartctl --json`; unavailable SMART data is reported as unavailable
 - Mounted filesystem capacity through `unix.Statfs`
-- GPT initialization and partition changes through `go-diskfs`, ext4/xfs formatting, mount/unmount, and `BLKRRPART` partition-table rereads
+- GPT initialization and partition changes through `go-diskfs`, ext4/xfs/btrfs/f2fs formatting, mount/unmount, zoned-device discovery, and `BLKRRPART` partition-table rereads
 
 `GET /api/disks` reports the live topology. The WebUI exposes GPT initialization, partition creation/deletion, formatting, and mount/unmount with explicit target confirmation.
 
@@ -23,13 +23,15 @@ The first successful mount registers its filesystem UUID in SQLite and allocates
 
 USB storage (`lsblk TRAN=usb`) uses a separate transient mount space. Attached devices receive insertion-order letters and supported ext4/xfs partitions are automatically mounted at `/usb<device-letter><partition-letter>`, for example `/usbaa` and `/usbab`. Removing a USB device releases its letter for the next device; USB storage only supports mount and unmount.
 
+Zoned devices are reported with their zone model and geometry. New partitions on zoned disks start and end on zone boundaries. Manually requested partition sizes must be an exact multiple of the zone size; requests to use the largest free region are rounded down to the largest complete zone range.
+
 Manually unmounting a USB partition suppresses its automatic mount for the current insertion cycle. Mounting it again or physically removing the device clears that suppression.
 
 ## Development
 
 Requirements: Go 1.26+, Node.js 24+, npm, and the Linux tools required by the implemented storage features.
 
-`lsblk`, `blkid`, `smartctl`, and `mkfs.ext4` are required for their respective features. XFS formatting also requires `mkfs.xfs`. SMART data is optional at runtime: disks without SMART support or systems without `smartctl` remain visible without temperature and health data. The `go-udev` monitor is behind the `libudev` build tag because it needs CGO and libudev development headers:
+`lsblk`, `blkid`, `smartctl`, and `mkfs.ext4` are required for their respective features. XFS formatting requires `mkfs.xfs`; btrfs and f2fs formatting require `mkfs.btrfs` and `mkfs.f2fs`. SMART data is optional at runtime: disks without SMART support or systems without `smartctl` remain visible without temperature and health data. The `go-udev` monitor is behind the `libudev` build tag because it needs CGO and libudev development headers:
 
 ```sh
 go build -tags libudev ./cmd/simplefsmanager

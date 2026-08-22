@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -65,5 +66,64 @@ func TestHasRAIDDescendant(t *testing.T) {
 func TestRequiresRebootForDeferredPartitionTableRefresh(t *testing.T) {
 	if !requiresReboot(fmt.Errorf("write partition table: %w", diskpkg.ErrReReadDeferred)) {
 		t.Fatal("expected deferred partition table refresh to require a reboot")
+	}
+}
+
+func TestZonedPartitionGapUsesZoneBoundaries(t *testing.T) {
+	table := &gpt.Table{
+		Partitions: []*gpt.Partition{
+			{Index: 1, Start: 4096, End: 8191},
+			{Index: 2, Start: 30000, End: 40959},
+		},
+	}
+	start, end, ok := largestPartitionGapAligned(table, 8192, true)
+	if !ok || start != 8192 || end != 24575 {
+		t.Fatalf("start, end, ok = %d, %d, %t; want 8192, 24575, true", start, end, ok)
+	}
+}
+
+func TestZonedManualPartitionSizeMustBeAligned(t *testing.T) {
+	device := lsblkDevice{Zoned: "host-managed", ZoneSize: 1024 * 1024}
+	if alignment := partitionAlignment(device, 512); alignment != 2048 {
+		t.Fatalf("alignment = %d, want 2048 sectors", alignment)
+	}
+}
+
+type recordingRunner struct {
+	name string
+	args []string
+}
+
+func (r *recordingRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	if name == "lsblk" {
+		return []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","mountpoints":[null],"children":[{"name":"sdb1","path":"/dev/sdb1","type":"part","mountpoints":[null]}]}]}`), nil
+	}
+	r.name = name
+	r.args = append([]string(nil), args...)
+	return nil, nil
+}
+
+func TestFormatSupportsBtrfsAndF2FS(t *testing.T) {
+	for _, test := range []struct {
+		filesystem string
+		command    string
+		args       []string
+	}{
+		{filesystem: "btrfs", command: "mkfs.btrfs", args: []string{"-f", "/dev/sdb1"}},
+		{filesystem: "f2fs", command: "mkfs.f2fs", args: []string{"-f", "/dev/sdb1"}},
+	} {
+		runner := &recordingRunner{}
+		manager := &Manager{runner: runner}
+		if err := manager.Format(context.Background(), "/dev/sdb1", test.filesystem); err != nil {
+			t.Fatal(err)
+		}
+		if runner.name != test.command || len(runner.args) != len(test.args) {
+			t.Fatalf("format %s = %s %q, want %s %q", test.filesystem, runner.name, runner.args, test.command, test.args)
+		}
+		for index := range test.args {
+			if runner.args[index] != test.args[index] {
+				t.Fatalf("format %s args = %q, want %q", test.filesystem, runner.args, test.args)
+			}
+		}
 	}
 }
