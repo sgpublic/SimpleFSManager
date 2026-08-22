@@ -84,12 +84,12 @@ export function Dashboard({
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 px-6 py-10 text-slate-100">
-      <section className="mx-auto max-w-5xl">
-        <header className="flex items-center justify-between border-b border-slate-800 pb-6">
-          <div className="flex items-center gap-3">
+    <main className="min-h-screen w-full min-w-0 bg-slate-950 px-4 py-6 text-slate-100 sm:px-6 sm:py-10">
+      <section className="mx-auto w-full min-w-0 max-w-5xl">
+        <header className="flex flex-col gap-4 border-b border-slate-800 pb-6 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
             <HardDrive className="text-cyan-400" />
-            <div>
+            <div className="min-w-0">
               <h1 className="text-xl font-semibold">SimpleFSManager</h1>
               <p className="text-sm text-slate-400">
                 {t("dashboard.signedIn", { username })}
@@ -97,7 +97,7 @@ export function Dashboard({
               <p className="mt-1 text-xs text-slate-600">{version}</p>
             </div>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-2">
             <LanguageSelect
               value={i18n.resolvedLanguage}
               onChange={(language) => void i18n.changeLanguage(language)}
