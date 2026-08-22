@@ -435,6 +435,8 @@ func errorCode(err error) string {
 		return "partition_not_found"
 	case strings.Contains(message, "unsupported filesystem"):
 		return "unsupported_filesystem"
+	case strings.Contains(message, "SMART") || strings.Contains(message, "smartctl"):
+		return "smart_query_failed"
 	case strings.Contains(message, "zoned partition size"):
 		return "invalid_zoned_partition_size"
 	case strings.Contains(message, "USB storage only supports") || strings.Contains(message, "USB storage is managed"):

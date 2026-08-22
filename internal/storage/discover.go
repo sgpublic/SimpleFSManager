@@ -159,6 +159,27 @@ func (m *Manager) smartMetadata(ctx context.Context, path string) (*float64, *bo
 	return temperature, health
 }
 
+// Smart returns the complete smartctl JSON document for a physical disk.
+// smartctl uses non-zero exit codes for some valid health states, so its exit
+// status is ignored when the command output is valid JSON.
+func (m *Manager) Smart(ctx context.Context, path string) ([]byte, error) {
+	if _, err := m.device(ctx, path); err != nil {
+		return nil, err
+	}
+	runner, ok := m.runner.(commandOutputRunner)
+	if !ok {
+		return nil, fmt.Errorf("SMART details are unavailable")
+	}
+	output, commandErr := runner.RunOutput(ctx, "smartctl", "--json", "-a", path)
+	if json.Valid(output) {
+		return output, nil
+	}
+	if commandErr != nil {
+		return nil, fmt.Errorf("read SMART data: %w", commandErr)
+	}
+	return nil, fmt.Errorf("read SMART data: invalid smartctl JSON")
+}
+
 func hasMountedDescendant(device lsblkDevice) bool {
 	for _, child := range device.Children {
 		if len(mountpoints(child.Mountpoints)) > 0 || hasMountedDescendant(child) {

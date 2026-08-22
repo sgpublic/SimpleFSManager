@@ -12,6 +12,7 @@ Single-user Linux disk management UI for physical disks, GPT partition tables, e
 - Embedded production frontend
 - Live physical disk and partition discovery through `lsblk --json`, with `blkid` fallback for UUID and filesystem type
 - SMART health and temperature discovery through `smartctl --json`; unavailable SMART data is reported as unavailable
+- Complete SMART JSON is available on demand through `GET /api/disks/smart?diskPath=/dev/...`
 - Mounted filesystem capacity through `unix.Statfs`
 - GPT initialization and partition changes through `go-diskfs`, ext4/xfs/btrfs/f2fs formatting, mount/unmount, zoned-device discovery, and `BLKRRPART` partition-table rereads
 

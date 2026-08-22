@@ -207,3 +207,29 @@ func TestListFallsBackToATAAttributeTemperature(t *testing.T) {
 		t.Fatalf("temperature = %#v, want 37", disks[0].TemperatureCelsius)
 	}
 }
+
+func TestSmartReturnsCompleteJSONWhenSmartctlReportsFailure(t *testing.T) {
+	manager := &Manager{runner: smartMetadataRunner{
+		lsblkOutput: []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","size":1000}]}`),
+		smartOutput: []byte(`{"smart_status":{"passed":false},"device":{"name":"/dev/sdb"},"ata_smart_attributes":{"table":[{"id":5,"name":"Reallocated_Sector_Ct","raw":{"value":3}}]}}`),
+		smartErr:    fmt.Errorf("smartctl exited with status 8"),
+	}}
+
+	data, err := manager.Smart(context.Background(), "/dev/sdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(manager.runner.(smartMetadataRunner).smartOutput) {
+		t.Fatalf("SMART data = %s, want complete smartctl JSON", data)
+	}
+}
+
+func TestSmartRejectsNonPhysicalDisk(t *testing.T) {
+	manager := &Manager{runner: smartMetadataRunner{
+		lsblkOutput: []byte(`{"blockdevices":[{"name":"sdb1","path":"/dev/sdb1","type":"part","size":1000}]}`),
+	}}
+
+	if _, err := manager.Smart(context.Background(), "/dev/sdb1"); err == nil {
+		t.Fatal("expected non-physical disk to be rejected")
+	}
+}

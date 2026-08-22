@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  CircleAlert,
   HardDrive,
   LogOut,
   Plus,
@@ -49,6 +50,7 @@ export function Dashboard({
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [smartDiskPath, setSmartDiskPath] = useState<string | null>(null);
   const [rebootRequired, setRebootRequired] = useState(false);
   const disks = useQuery({
     queryKey: ["disks"],
@@ -214,7 +216,10 @@ export function Dashboard({
                       value={disk.transport || t("dashboard.unknown")}
                     />
                     <TemperatureMetric temperature={disk.temperatureCelsius} />
-                    <SmartMetric health={disk.smartHealth} />
+                    <SmartMetric
+                      health={disk.smartHealth}
+                      onDetails={() => setSmartDiskPath(disk.path)}
+                    />
                   </div>
                   <details className="mt-4 sm:hidden">
                     <summary className="cursor-pointer text-sm text-cyan-300 hover:text-cyan-200">
@@ -263,7 +268,10 @@ export function Dashboard({
                       value={String(partitions.length)}
                     />
                     <TemperatureMetric temperature={disk.temperatureCelsius} />
-                    <SmartMetric health={disk.smartHealth} />
+                    <SmartMetric
+                      health={disk.smartHealth}
+                      onDetails={() => setSmartDiskPath(disk.path)}
+                    />
                   </div>
                   {!disk.usb && (
                     <div className="mt-5 flex flex-wrap gap-2">
@@ -433,6 +441,12 @@ export function Dashboard({
           pending={operation.isPending}
           onCancel={() => setDialog(null)}
           onSubmit={(next) => operation.mutate(next)}
+        />
+      )}
+      {smartDiskPath && (
+        <SmartDetailsDialog
+          diskPath={smartDiskPath}
+          onClose={() => setSmartDiskPath(null)}
         />
       )}
       {rebootRequired && (
@@ -942,7 +956,13 @@ function TemperatureMetric({ temperature }: { temperature?: number }) {
     />
   );
 }
-function SmartMetric({ health }: { health?: boolean }) {
+function SmartMetric({
+  health,
+  onDetails,
+}: {
+  health?: boolean;
+  onDetails: () => void;
+}) {
   const { t } = useTranslation();
   const color =
     health === undefined
@@ -951,17 +971,103 @@ function SmartMetric({ health }: { health?: boolean }) {
         ? "text-emerald-300"
         : "text-rose-300";
   return (
-    <Metric
-      label="SMART"
-      value={
-        health === undefined
-          ? t("dashboard.unknown")
-          : health
-            ? t("dashboard.smartHealthy")
-            : t("dashboard.smartFailed")
-      }
-      valueClassName={color}
-    />
+    <div className="flex items-end gap-2">
+      <Metric
+        label="SMART"
+        value={
+          health === undefined
+            ? t("dashboard.unknown")
+            : health
+              ? t("dashboard.smartHealthy")
+              : t("dashboard.smartFailed")
+        }
+        valueClassName={color}
+      />
+      <button
+        type="button"
+        onClick={onDetails}
+        className="mb-0.5 rounded-md p-1 text-slate-400 hover:bg-slate-800 hover:text-cyan-300"
+        aria-label={t("dashboard.smartDetails")}
+        title={t("dashboard.smartDetails")}
+      >
+        <CircleAlert size={15} />
+      </button>
+    </div>
+  );
+}
+
+function SmartDetailsDialog({
+  diskPath,
+  onClose,
+}: {
+  diskPath: string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const details = useQuery({
+    queryKey: ["smart", diskPath],
+    queryFn: async () => {
+      const { data, error } = await api.GET("/api/disks/smart", {
+        params: { query: { diskPath } },
+      });
+      if (error || !data) throw new ApiError("smart_query_failed");
+      return data.data;
+    },
+  });
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="smart-details-title"
+        className="flex max-h-[85vh] w-full max-w-4xl flex-col rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl shadow-black/60"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 id="smart-details-title" className="text-lg font-semibold">
+              {t("dashboard.smartDetails")}
+            </h2>
+            <p className="mt-1 break-all font-mono text-xs text-slate-400">
+              {diskPath}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+            aria-label={t("dialog.cancel")}
+          >
+            <X size={20} />
+          </button>
+        </div>
+        <div className="mt-5 min-h-0 overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-4">
+          {details.isLoading && (
+            <p className="text-sm text-slate-400">{t("dashboard.smartLoading")}</p>
+          )}
+          {details.isError && (
+            <p className="text-sm text-rose-300">{t("dashboard.smartUnavailable")}</p>
+          )}
+          {details.data && (
+            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-5 text-slate-300">
+              {JSON.stringify(details.data, null, 2)}
+            </pre>
+          )}
+        </div>
+      </section>
+    </div>
   );
 }
 function ActionButton({
