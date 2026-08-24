@@ -456,7 +456,7 @@ func confirm(target, value string) error {
 }
 
 func badRequest(err error) error {
-	return huma.Error400BadRequest(errorCode(err))
+	return huma.Error400BadRequest(errorCode(err), err)
 }
 
 func operationError(logger *slog.Logger, operation string, err error, args ...any) error {
@@ -510,7 +510,10 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 }
 
 func writeError(writer http.ResponseWriter, status int, err error) {
-	writeJSON(writer, status, map[string]string{"code": errorCode(err)})
+	writeJSON(writer, status, map[string]string{
+		"code":    errorCode(err),
+		"message": err.Error(),
+	})
 }
 
 func errorCode(err error) string {
@@ -597,7 +600,7 @@ func recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
 			defer func() {
 				if recovered := recover(); recovered != nil {
 					logger.Error("panic while serving request", "method", r.Method, "path", r.URL.Path, "panic", recovered, "stack", string(debug.Stack()))
-					http.Error(w, "internal server error", http.StatusInternalServerError)
+					writeError(w, http.StatusInternalServerError, fmt.Errorf("panic while serving request: %v", recovered))
 				}
 			}()
 			next.ServeHTTP(w, r)

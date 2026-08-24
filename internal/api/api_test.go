@@ -90,3 +90,12 @@ func TestRecovererLogsPanic(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteErrorIncludesCodeAndMessage(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeError(response, http.StatusInternalServerError, errors.New("lsblk failed: permission denied"))
+
+	if body := response.Body.String(); !strings.Contains(body, `"code":"internal_error"`) || !strings.Contains(body, `"message":"lsblk failed: permission denied"`) {
+		t.Fatalf("error response = %s", body)
+	}
+}

@@ -15,8 +15,9 @@ class ApiError extends Error {
   constructor(
     public code: string,
     public params: Record<string, unknown> = {},
+    public message = code,
   ) {
-    super(code);
+    super(message);
   }
 }
 
@@ -301,6 +302,11 @@ function ErrorText({ error }: { error: Error }) {
         ...apiError.params,
         defaultValue: t("errors.internal_error"),
       })}
+      {apiError.message !== apiError.code && (
+        <span className="mt-1 block break-words text-xs text-rose-300/80">
+          {apiError.message}
+        </span>
+      )}
     </>
   );
 }
@@ -333,12 +339,17 @@ async function request<T = unknown>(
   if (!response.ok) {
     const error = (await response.json().catch(() => null)) as {
       code?: string;
+      message?: string;
       detail?: string;
+      errors?: Array<{ message?: string }>;
       params?: Record<string, unknown>;
     } | null;
+    const message =
+      error?.message ?? error?.errors?.find((item) => item.message)?.message ?? error?.detail ?? "request_failed";
     throw new ApiError(
       error?.code ?? error?.detail ?? "request_failed",
       error?.params,
+      message,
     );
   }
   return response.status === 204

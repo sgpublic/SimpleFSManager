@@ -45,8 +45,11 @@ type Dialog =
   | CreateDialog;
 
 class ApiError extends Error {
-  constructor(public code: string) {
-    super(code);
+  constructor(
+    public code: string,
+    public message = code,
+  ) {
+    super(message);
   }
 }
 
@@ -1032,8 +1035,16 @@ function LanguageSelect({
 function ErrorText({ error }: { error: Error }) {
   const { t } = useTranslation();
   const code = error instanceof ApiError ? error.code : "internal_error";
+  const message = error instanceof ApiError ? error.message : error.message;
   return (
-    <>{t(`errors.${code}`, { defaultValue: t("errors.internal_error") })}</>
+    <>
+      {t(`errors.${code}`, { defaultValue: t("errors.internal_error") })}
+      {message && message !== code && (
+        <span className="mt-1 block break-words text-xs text-rose-300/80">
+          {message}
+        </span>
+      )}
+    </>
   );
 }
 function Metric({
@@ -1235,9 +1246,13 @@ async function request(
   if (!response.ok) {
     const error = (await response.json().catch(() => null)) as {
       code?: string;
+      message?: string;
       detail?: string;
+      errors?: Array<{ message?: string }>;
     } | null;
-    throw new ApiError(error?.code ?? error?.detail ?? "request_failed");
+    const message =
+      error?.message ?? error?.errors?.find((item) => item.message)?.message ?? error?.detail ?? "request_failed";
+    throw new ApiError(error?.code ?? error?.detail ?? "request_failed", message);
   }
   return response.json();
 }
