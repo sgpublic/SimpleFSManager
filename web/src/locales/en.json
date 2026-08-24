@@ -71,9 +71,9 @@
     "largestFree": "Use the largest contiguous free space",
     "largestFreeHint": "Calculated precisely by the service for disks with multiple free regions.",
     "manualSize": "Set size manually",
-    "partitionSize": "Partition size (GiB)",
+    "partitionSize": "Partition size (GB)",
     "partitionName": "Partition label (optional)",
-    "maximumSize": "Maximum {{size}} GiB",
+    "maximumSize": "Maximum {{size}} GB",
     "cancel": "Cancel",
     "processing": "Processing...",
     "confirmIn": "Confirm in {{seconds}}s"

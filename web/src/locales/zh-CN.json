@@ -71,9 +71,9 @@
     "largestFree": "占满最大连续空闲区",
     "largestFreeHint": "由服务端精确计算，适用于有多个空闲区域的磁盘。",
     "manualSize": "手动设置容量",
-    "partitionSize": "分区容量 (GiB)",
+    "partitionSize": "分区容量 (GB)",
     "partitionName": "分区标签（可选）",
-    "maximumSize": "最大 {{size}} GiB",
+    "maximumSize": "最大 {{size}} GB",
     "cancel": "取消",
     "processing": "处理中...",
     "confirmIn": "{{seconds}} 秒后可确认"

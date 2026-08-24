@@ -34,7 +34,7 @@ type MountPathDialog = {
 type CreateDialog = {
   kind: "create";
   target: string;
-  maxGiB: number;
+  maxGB: number;
   zoneSizeBytes?: number;
 };
 type Dialog =
@@ -351,10 +351,10 @@ export function Dashboard({
                                       setDialog({
                                         kind: "create",
                                         target: disk.path,
-                                        maxGiB: Math.max(
+                                        maxGB: Math.max(
                                           1,
                                           Math.floor(
-                                            disk.sizeBytes / 1024 ** 3,
+                                            disk.sizeBytes / 1000 ** 3,
                                           ),
                                         ),
                                         zoneSizeBytes: disk.zoneSizeBytes,
@@ -715,7 +715,7 @@ function OperationDialog({
     "ext4" | "xfs" | "btrfs" | "f2fs"
   >("ext4");
   const [size, setSize] = useState(() =>
-    dialog.kind === "create" ? String(Math.min(100, dialog.maxGiB)) : "100",
+    dialog.kind === "create" ? String(Math.min(100, dialog.maxGB)) : "100",
   );
   const [name, setName] = useState("");
   const [partitionMode, setPartitionMode] = useState<"largest" | "manual">(
@@ -759,9 +759,9 @@ function OperationDialog({
     Number.isFinite(Number(size)) &&
     Number(size) > 0 &&
     (dialog.kind !== "create" ||
-      (Number(size) <= dialog.maxGiB &&
+      (Number(size) <= dialog.maxGB &&
         (!dialog.zoneSizeBytes ||
-          Math.round(Number(size) * 1024 ** 3) % dialog.zoneSizeBytes === 0)));
+          Math.round(Number(size) * 1000 ** 3) % dialog.zoneSizeBytes === 0)));
   const canSubmit =
     seconds === 0 &&
     (dialog.kind !== "create" || partitionMode === "largest" || validSize) &&
@@ -792,7 +792,7 @@ function OperationDialog({
           sizeBytes:
             partitionMode === "largest"
               ? 0
-              : Math.round(Number(size) * 1024 ** 3),
+              : Math.round(Number(size) * 1000 ** 3),
           useLargestFree: partitionMode === "largest",
           name,
           confirm: dialog.target,
@@ -935,11 +935,11 @@ function OperationDialog({
                       className="min-w-0 flex-1 accent-cyan-400"
                       type="range"
                       min="1"
-                      max={dialog.maxGiB}
+                      max={dialog.maxGB}
                       step="1"
                       value={Math.min(
                         Math.max(1, Number(size) || 1),
-                        dialog.maxGiB,
+                        dialog.maxGB,
                       )}
                       onChange={(event) => setSize(event.target.value)}
                       disabled={pending}
@@ -948,7 +948,7 @@ function OperationDialog({
                       className="w-28 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-400"
                       type="number"
                       min="1"
-                      max={dialog.maxGiB}
+                      max={dialog.maxGB}
                       step="1"
                       value={size}
                       onChange={(event) => setSize(event.target.value)}
@@ -957,7 +957,7 @@ function OperationDialog({
                     />
                   </div>
                   <span className="mt-1 block text-xs text-slate-500">
-                    {t("dialog.maximumSize", { size: dialog.maxGiB })}
+                    {t("dialog.maximumSize", { size: dialog.maxGB })}
                   </span>
                 </label>
               )}
@@ -1257,11 +1257,11 @@ async function request(
   return response.json();
 }
 function formatBytes(bytes: number) {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
   let value = bytes;
   let index = 0;
   while (value > 800 && index < units.length - 1) {
-    value /= 1024;
+    value /= 1000;
     index++;
   }
   const rounded = Math.round(value * 100) / 100;
