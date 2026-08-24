@@ -50,6 +50,7 @@
     "unmount": "卸载",
     "modifyMountPath": "修改挂载路径",
     "format": "格式化",
+    "formatWholeDisk": "格式化整盘",
     "delete": "删除",
     "reclaim": "接管并清空磁盘",
     "rebootRequired": "GPT 已写入磁盘，但系统需重启后才能使用新的分区表。",

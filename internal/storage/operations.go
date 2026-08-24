@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"unsafe"
 
 	"github.com/diskfs/go-diskfs"
 	diskpkg "github.com/diskfs/go-diskfs/disk"
@@ -21,17 +19,6 @@ import (
 
 var volumePath = regexp.MustCompile(`^/vol[1-9][0-9]*$`)
 var usbPath = regexp.MustCompile(`^/usb[a-z][a-z]$`)
-
-const (
-	gptPartitionArrayBytes = 128 * 128
-	blkResetZone           = 0x40101283
-	zeroFillChunkBytes     = 1024 * 1024
-)
-
-type zoneRange struct {
-	Sector    uint64
-	NrSectors uint64
-}
 
 // ValidateMountPath accepts application-managed absolute directories while
 // excluding paths that are part of the operating system's live namespace.
@@ -53,6 +40,13 @@ func (m *Manager) InitializeGPT(ctx context.Context, diskPath string) (bool, err
 	if err := m.ensureUnusedDisk(ctx, diskPath); err != nil {
 		return false, err
 	}
+	device, err := m.device(ctx, diskPath)
+	if err != nil {
+		return false, err
+	}
+	if isHostManaged(device) {
+		return false, fmt.Errorf("host-managed zoned disks must be formatted as a whole-disk F2FS volume")
+	}
 	return m.initializeGPT(ctx, diskPath)
 }
 
@@ -71,6 +65,9 @@ func (m *Manager) Reclaim(ctx context.Context, diskPath string) (bool, error) {
 	}
 	if !hasStorageStack(device) {
 		return false, fmt.Errorf("disk %s does not contain a reclaimable storage stack", diskPath)
+	}
+	if isHostManaged(device) {
+		return false, fmt.Errorf("host-managed zoned disks must be formatted as a whole-disk F2FS volume")
 	}
 
 	for _, child := range postorder(device) {
@@ -135,6 +132,10 @@ func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeByte
 		disk.Close()
 		return 0, err
 	}
+	if isHostManaged(device) {
+		disk.Close()
+		return 0, fmt.Errorf("host-managed zoned disks do not support partitions; format the whole disk as F2FS")
+	}
 	alignment := partitionAlignment(device, uint64(disk.LogicalBlocksize))
 	var start, end uint64
 	if useLargestFree {
@@ -174,10 +175,6 @@ func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeByte
 		Type:  gpt.LinuxFilesystem,
 		Name:  name,
 	})
-	if err := prepareGPTWrite(diskPath, uint64(disk.Size), uint64(disk.LogicalBlocksize), table, device); err != nil {
-		disk.Close()
-		return 0, err
-	}
 	if err := disk.Partition(table); err != nil {
 		disk.Close()
 		return 0, fmt.Errorf("write GPT partition: %w", err)
@@ -198,6 +195,13 @@ func (m *Manager) DeletePartition(ctx context.Context, diskPath string, index in
 	}
 	if err := m.ensureUnusedDisk(ctx, diskPath); err != nil {
 		return err
+	}
+	device, err := m.device(ctx, diskPath)
+	if err != nil {
+		return err
+	}
+	if isHostManaged(device) {
+		return fmt.Errorf("host-managed zoned disks do not support partitions")
 	}
 	disk, err := diskfs.Open(diskPath)
 	if err != nil {
@@ -222,15 +226,6 @@ func (m *Manager) DeletePartition(ctx context.Context, diskPath string, index in
 		return fmt.Errorf("GPT partition %d does not exist", index)
 	}
 	table.Partitions = partitions
-	device, err := m.device(ctx, diskPath)
-	if err != nil {
-		disk.Close()
-		return err
-	}
-	if err := prepareGPTWrite(diskPath, uint64(disk.Size), uint64(disk.LogicalBlocksize), table, device); err != nil {
-		disk.Close()
-		return err
-	}
 	if err := disk.Partition(table); err != nil {
 		disk.Close()
 		return fmt.Errorf("write GPT partition deletion: %w", err)
@@ -244,6 +239,13 @@ func (m *Manager) DeletePartition(ctx context.Context, diskPath string, index in
 func (m *Manager) Format(ctx context.Context, partitionPath, filesystem string) error {
 	if err := m.ensureUnusedPartition(ctx, partitionPath, false); err != nil {
 		return err
+	}
+	disk, partition, err := m.Partition(ctx, partitionPath)
+	if err != nil {
+		return err
+	}
+	if disk.Path == partition.Path && isHostManaged(lsblkDevice{Zoned: disk.Zoned, ZoneSize: disk.ZoneSizeBytes}) {
+		return fmt.Errorf("host-managed zoned disks must be formatted through the whole-disk F2FS operation")
 	}
 	var command string
 	var args []string
@@ -261,6 +263,24 @@ func (m *Manager) Format(ctx context.Context, partitionPath, filesystem string) 
 	}
 	if _, err := m.runner.Run(ctx, command, args...); err != nil {
 		return fmt.Errorf("format %s as %s: %w", partitionPath, filesystem, err)
+	}
+	return nil
+}
+
+// FormatWholeDisk formats a host-managed zoned disk as one F2FS volume.
+func (m *Manager) FormatWholeDisk(ctx context.Context, diskPath string) error {
+	if err := m.ensureUnusedDisk(ctx, diskPath); err != nil {
+		return err
+	}
+	device, err := m.device(ctx, diskPath)
+	if err != nil {
+		return err
+	}
+	if !isHostManaged(device) {
+		return fmt.Errorf("whole-disk formatting is only supported for host-managed zoned disks")
+	}
+	if _, err := m.runner.Run(ctx, "mkfs.f2fs", "-f", "-m", diskPath); err != nil {
+		return fmt.Errorf("format host-managed disk %s as f2fs: %w", diskPath, err)
 	}
 	return nil
 }
@@ -362,15 +382,6 @@ func (m *Manager) initializeGPT(ctx context.Context, diskPath string) (bool, err
 		PhysicalSectorSize: int(disk.PhysicalBlocksize),
 		ProtectiveMBR:      true,
 	}
-	device, err := m.device(ctx, diskPath)
-	if err != nil {
-		disk.Close()
-		return false, err
-	}
-	if err := prepareGPTWrite(diskPath, uint64(disk.Size), uint64(disk.LogicalBlocksize), table, device); err != nil {
-		disk.Close()
-		return false, err
-	}
 	if err := disk.Partition(table); err != nil {
 		disk.Close()
 		if requiresReboot(err) {
@@ -388,110 +399,6 @@ func (m *Manager) initializeGPT(ctx context.Context, diskPath string) (bool, err
 		return false, err
 	}
 	return false, nil
-}
-
-// prepareGPTWrite moves the final sequential zone's write pointer to the
-// backup GPT. GPT always writes its backup structures at the end of the disk.
-func prepareGPTWrite(diskPath string, diskSize, logicalBlockSize uint64, table *gpt.Table, device lsblkDevice) error {
-	if !isHostManaged(device) {
-		return nil
-	}
-	backupStart, err := gptBackupStart(diskSize, logicalBlockSize, table)
-	if err != nil {
-		return err
-	}
-	zoneStart, zoneLength, err := finalZone(diskSize, device.ZoneSize)
-	if err != nil {
-		return err
-	}
-	if backupStart < zoneStart {
-		return fmt.Errorf("backup GPT starts before the final zone")
-	}
-	granularity := device.ZoneWriteGranularity
-	if granularity == 0 {
-		return fmt.Errorf("host-managed disk does not report zone write granularity")
-	}
-	if zoneStart%granularity != 0 || backupStart%granularity != 0 {
-		return fmt.Errorf("backup GPT is not aligned to the %d-byte zone write granularity", granularity)
-	}
-
-	deviceFile, err := os.OpenFile(diskPath, os.O_WRONLY, 0)
-	if err != nil {
-		return fmt.Errorf("open host-managed disk for GPT preparation: %w", err)
-	}
-	defer deviceFile.Close()
-	if err := resetZone(deviceFile, zoneStart, zoneLength); err != nil {
-		return fmt.Errorf("reset final zone before writing GPT backup: %w", err)
-	}
-	if err := zeroFill(deviceFile, zoneStart, backupStart-zoneStart, granularity); err != nil {
-		return fmt.Errorf("fill final zone before writing GPT backup: %w", err)
-	}
-	if err := deviceFile.Sync(); err != nil {
-		return fmt.Errorf("sync final zone before writing GPT backup: %w", err)
-	}
-	return nil
-}
-
-func gptBackupStart(diskSize, logicalBlockSize uint64, table *gpt.Table) (uint64, error) {
-	if logicalBlockSize == 0 || diskSize%logicalBlockSize != 0 {
-		return 0, fmt.Errorf("invalid GPT logical block size %d for disk size %d", logicalBlockSize, diskSize)
-	}
-	if diskSize < logicalBlockSize+gptPartitionArrayBytes {
-		return 0, fmt.Errorf("disk is too small for a GPT")
-	}
-	if lastDataSector := table.LastDataSector(); lastDataSector != 0 {
-		return (lastDataSector + 1) * logicalBlockSize, nil
-	}
-	return diskSize - logicalBlockSize - gptPartitionArrayBytes, nil
-}
-
-func finalZone(diskSize, zoneSize uint64) (uint64, uint64, error) {
-	if zoneSize == 0 || diskSize == 0 {
-		return 0, 0, fmt.Errorf("invalid zone geometry: disk size %d, zone size %d", diskSize, zoneSize)
-	}
-	start := (diskSize - 1) / zoneSize * zoneSize
-	return start, diskSize - start, nil
-}
-
-func resetZone(device *os.File, start, length uint64) error {
-	if start%512 != 0 || length%512 != 0 {
-		return fmt.Errorf("zone range must be 512-byte aligned")
-	}
-	rangeToReset := zoneRange{Sector: start / 512, NrSectors: length / 512}
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, device.Fd(), uintptr(blkResetZone), uintptr(unsafe.Pointer(&rangeToReset)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func zeroFill(writer io.WriterAt, start, length, granularity uint64) error {
-	if length == 0 {
-		return nil
-	}
-	if granularity == 0 || start%granularity != 0 || length%granularity != 0 {
-		return fmt.Errorf("zero-fill range is not aligned to zone write granularity")
-	}
-	chunkSize := uint64(zeroFillChunkBytes)
-	if chunkSize%granularity != 0 {
-		chunkSize = granularity
-	}
-	zeros := make([]byte, chunkSize)
-	for written := uint64(0); written < length; {
-		count := chunkSize
-		if remaining := length - written; remaining < count {
-			count = remaining
-		}
-		n, err := writer.WriteAt(zeros[:count], int64(start+written))
-		if err != nil {
-			return err
-		}
-		if n != int(count) {
-			return io.ErrShortWrite
-		}
-		written += count
-	}
-	return nil
 }
 
 func requiresReboot(err error) bool {

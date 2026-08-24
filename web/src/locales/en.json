@@ -50,6 +50,7 @@
     "unmount": "Unmount",
     "modifyMountPath": "Modify mount path",
     "format": "Format",
+    "formatWholeDisk": "Format whole disk",
     "delete": "Delete",
     "reclaim": "Reclaim and erase disk",
     "rebootRequired": "The GPT was written, but the system must restart before the new partition table can be used.",

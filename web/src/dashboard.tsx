@@ -24,6 +24,7 @@ type ConfirmDialog = {
   operation: Operation;
 };
 type FormatDialog = { kind: "format"; target: string };
+type WholeDiskFormatDialog = { kind: "formatDisk"; target: string };
 type MountPathDialog = {
   kind: "mountPath";
   target: string;
@@ -35,7 +36,12 @@ type CreateDialog = {
   maxGiB: number;
   zoneSizeBytes?: number;
 };
-type Dialog = ConfirmDialog | FormatDialog | MountPathDialog | CreateDialog;
+type Dialog =
+  | ConfirmDialog
+  | FormatDialog
+  | WholeDiskFormatDialog
+  | MountPathDialog
+  | CreateDialog;
 
 class ApiError extends Error {
   constructor(public code: string) {
@@ -301,40 +307,57 @@ export function Dashboard({
                       ) : (
                         !disk.protected && (
                           <>
-                            <DangerButton
-                              onClick={() =>
-                                confirm(
-                                  disk.path,
-                                  t("dashboard.initializeGPT"),
-                                  (confirmation) => ({
-                                    path: "/api/disks/gpt",
-                                    body: {
-                                      diskPath: disk.path,
-                                      confirm: confirmation,
-                                    },
-                                  }),
-                                )
-                              }
-                            >
-                              {t("dashboard.initializeGPT")}
-                            </DangerButton>
-                            {disk.partitioning === "gpt" && (
-                              <ActionButton
+                            {disk.zoned === "host-managed" ? (
+                              <DangerButton
                                 onClick={() =>
                                   setDialog({
-                                    kind: "create",
+                                    kind: "formatDisk",
                                     target: disk.path,
-                                    maxGiB: Math.max(
-                                      1,
-                                      Math.floor(disk.sizeBytes / 1024 ** 3),
-                                    ),
-                                    zoneSizeBytes: disk.zoneSizeBytes,
                                   })
                                 }
                               >
-                                <Plus size={15} />{" "}
-                                {t("dashboard.createPartition")}
-                              </ActionButton>
+                                {t("dashboard.formatWholeDisk")}
+                              </DangerButton>
+                            ) : (
+                              <>
+                                <DangerButton
+                                  onClick={() =>
+                                    confirm(
+                                      disk.path,
+                                      t("dashboard.initializeGPT"),
+                                      (confirmation) => ({
+                                        path: "/api/disks/gpt",
+                                        body: {
+                                          diskPath: disk.path,
+                                          confirm: confirmation,
+                                        },
+                                      }),
+                                    )
+                                  }
+                                >
+                                  {t("dashboard.initializeGPT")}
+                                </DangerButton>
+                                {disk.partitioning === "gpt" && (
+                                  <ActionButton
+                                    onClick={() =>
+                                      setDialog({
+                                        kind: "create",
+                                        target: disk.path,
+                                        maxGiB: Math.max(
+                                          1,
+                                          Math.floor(
+                                            disk.sizeBytes / 1024 ** 3,
+                                          ),
+                                        ),
+                                        zoneSizeBytes: disk.zoneSizeBytes,
+                                      })
+                                    }
+                                  >
+                                    <Plus size={15} />{" "}
+                                    {t("dashboard.createPartition")}
+                                  </ActionButton>
+                                )}
+                              </>
                             )}
                           </>
                         )
@@ -424,16 +447,16 @@ export function Dashboard({
                                 <ManagedPartitionActions
                                   diskPath={disk.path}
                                   partition={partition}
-                                   system={disk.system}
-                                   confirm={confirm}
-                                   openMountPath={(target, currentPath) =>
-                                     setDialog({
-                                       kind: "mountPath",
-                                       target,
-                                       currentPath,
-                                     })
-                                   }
-                                   openFormat={(target) =>
+                                  system={disk.system}
+                                  confirm={confirm}
+                                  openMountPath={(target, currentPath) =>
+                                    setDialog({
+                                      kind: "mountPath",
+                                      target,
+                                      currentPath,
+                                    })
+                                  }
+                                  openFormat={(target) =>
                                     setDialog({ kind: "format", target })
                                   }
                                 />
@@ -590,20 +613,19 @@ function ManagedPartitionActions({
 }) {
   const { t } = useTranslation();
   if (partition.mountpoints?.length > 0)
-    return (
-      partition.mountPath && partition.mountpoints.includes(partition.mountPath) ? (
-        <ActionButton
-          onClick={() =>
-            confirm(partition.uuid, t("dashboard.unmount"), (confirmation) => ({
-              path: "/api/volumes/unmount",
-              body: { uuid: partition.uuid, confirm: confirmation },
-            }))
-          }
-        >
-          {t("dashboard.unmount")}
-        </ActionButton>
-      ) : null
-    );
+    return partition.mountPath &&
+      partition.mountpoints.includes(partition.mountPath) ? (
+      <ActionButton
+        onClick={() =>
+          confirm(partition.uuid, t("dashboard.unmount"), (confirmation) => ({
+            path: "/api/volumes/unmount",
+            body: { uuid: partition.uuid, confirm: confirmation },
+          }))
+        }
+      >
+        {t("dashboard.unmount")}
+      </ActionButton>
+    ) : null;
   if (system || partition.mountpoints?.length > 0) return null;
   return (
     <>
@@ -630,23 +652,27 @@ function ManagedPartitionActions({
           </ActionButton>
         )}
       </>
-      <DangerButton onClick={() => openFormat(partition.path)}>
-        {t("dashboard.format")}
-      </DangerButton>
-      <DangerButton
-        onClick={() =>
-          confirm(diskPath, t("dashboard.delete"), (confirmation) => ({
-            path: "/api/partitions/delete",
-            body: {
-              diskPath,
-              partitionNumber: partition.number,
-              confirm: confirmation,
-            },
-          }))
-        }
-      >
-        {t("dashboard.delete")}
-      </DangerButton>
+      {partition.number > 0 && (
+        <DangerButton onClick={() => openFormat(partition.path)}>
+          {t("dashboard.format")}
+        </DangerButton>
+      )}
+      {partition.number > 0 && (
+        <DangerButton
+          onClick={() =>
+            confirm(diskPath, t("dashboard.delete"), (confirmation) => ({
+              path: "/api/partitions/delete",
+              body: {
+                diskPath,
+                partitionNumber: partition.number,
+                confirm: confirmation,
+              },
+            }))
+          }
+        >
+          {t("dashboard.delete")}
+        </DangerButton>
+      )}
     </>
   );
 }
@@ -676,6 +702,9 @@ function OperationDialog({
   const [mountPath, setMountPath] = useState("");
   const [seconds, setSeconds] = useState(5);
   useEffect(() => {
+    if (dialog.kind === "formatDisk") {
+      setFilesystem("f2fs");
+    }
     if (dialog.kind === "mountPath") {
       setMountPath(dialog.currentPath);
     }
@@ -699,19 +728,18 @@ function OperationDialog({
   const title =
     dialog.kind === "create"
       ? t("dashboard.createPartition")
-      : dialog.kind === "format"
+      : dialog.kind === "format" || dialog.kind === "formatDisk"
         ? t("dashboard.format")
         : dialog.kind === "mountPath"
           ? t("dashboard.modifyMountPath")
-        : dialog.title;
+          : dialog.title;
   const validSize =
     Number.isFinite(Number(size)) &&
     Number(size) > 0 &&
     (dialog.kind !== "create" ||
       (Number(size) <= dialog.maxGiB &&
         (!dialog.zoneSizeBytes ||
-          Math.round(Number(size) * 1024 ** 3) % dialog.zoneSizeBytes ===
-            0)));
+          Math.round(Number(size) * 1024 ** 3) % dialog.zoneSizeBytes === 0)));
   const canSubmit =
     seconds === 0 &&
     (dialog.kind !== "create" || partitionMode === "largest" || validSize) &&
@@ -729,6 +757,11 @@ function OperationDialog({
           confirm: dialog.target,
         },
       });
+    if (dialog.kind === "formatDisk")
+      onSubmit({
+        path: "/api/disks/format-f2fs",
+        body: { diskPath: dialog.target, confirm: dialog.target },
+      });
     if (dialog.kind === "create")
       onSubmit({
         path: "/api/partitions",
@@ -740,7 +773,7 @@ function OperationDialog({
               : Math.round(Number(size) * 1024 ** 3),
           useLargestFree: partitionMode === "largest",
           name,
-         confirm: dialog.target,
+          confirm: dialog.target,
         },
       });
     if (dialog.kind === "mountPath")
@@ -809,13 +842,16 @@ function OperationDialog({
               </span>
             </label>
           )}
-          {dialog.kind === "format" && (
+          {(dialog.kind === "format" || dialog.kind === "formatDisk") && (
             <fieldset>
               <legend className="text-sm font-medium text-slate-200">
                 {t("dialog.filesystem")}
               </legend>
               <div className="mt-2 grid grid-cols-2 gap-3">
-                {(["ext4", "xfs", "btrfs", "f2fs"] as const).map((value) => (
+                {(dialog.kind === "formatDisk"
+                  ? (["f2fs"] as const)
+                  : (["ext4", "xfs", "btrfs", "f2fs"] as const)
+                ).map((value) => (
                   <label
                     key={value}
                     className={`cursor-pointer rounded-lg border px-3 py-3 text-sm ${filesystem === value ? "border-cyan-400 bg-cyan-400/10 text-cyan-200" : "border-slate-700 text-slate-300"}`}
@@ -1009,9 +1045,7 @@ function TemperatureMetric({ temperature }: { temperature?: number }) {
     <Metric
       label={t("dashboard.temperature")}
       value={
-        temperature === undefined
-          ? "-- °C"
-          : `${Math.round(temperature)} °C`
+        temperature === undefined ? "-- °C" : `${Math.round(temperature)} °C`
       }
       valueClassName={color}
     />
@@ -1116,10 +1150,14 @@ function SmartDetailsDialog({
         </div>
         <div className="mt-5 min-h-0 overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-4">
           {details.isLoading && (
-            <p className="text-sm text-slate-400">{t("dashboard.smartLoading")}</p>
+            <p className="text-sm text-slate-400">
+              {t("dashboard.smartLoading")}
+            </p>
           )}
           {details.isError && (
-            <p className="text-sm text-rose-300">{t("dashboard.smartUnavailable")}</p>
+            <p className="text-sm text-rose-300">
+              {t("dashboard.smartUnavailable")}
+            </p>
           )}
           {details.data && (
             <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-5 text-slate-300">

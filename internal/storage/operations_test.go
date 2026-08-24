@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"fmt"
-	"io"
 	"testing"
 
 	diskpkg "github.com/diskfs/go-diskfs/disk"
@@ -103,85 +102,17 @@ func TestZonedManualPartitionSizeMustBeAligned(t *testing.T) {
 	}
 }
 
-func TestGPTBackupStartUsesDefaultAndExistingGPTGeometry(t *testing.T) {
-	const (
-		diskSize  = 1024 * 1024 * 1024
-		blockSize = 4096
-	)
-	start, err := gptBackupStart(diskSize, blockSize, &gpt.Table{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := uint64(diskSize - blockSize - gptPartitionArrayBytes); start != want {
-		t.Fatalf("default backup start = %d, want %d", start, want)
-	}
-
-	table := &gpt.Table{LogicalSectorSize: blockSize}
-	table.Resize(diskSize)
-	start, err = gptBackupStart(diskSize, blockSize, table)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := (table.LastDataSector() + 1) * blockSize; start != want {
-		t.Fatalf("existing backup start = %d, want %d", start, want)
-	}
-}
-
-func TestFinalZoneUsesLastPartialZone(t *testing.T) {
-	start, length, err := finalZone(10*1024+100, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if start != 10*1024 || length != 100 {
-		t.Fatalf("final zone = start %d, length %d; want 10240, 100", start, length)
-	}
-}
-
-func TestZeroFillWritesSequentialAlignedChunks(t *testing.T) {
-	writer := &sequentialWriter{next: 4096}
-	if err := zeroFill(writer, 4096, 3*1024*1024, 4096); err != nil {
-		t.Fatal(err)
-	}
-	if writer.next != 3*1024*1024+4096 {
-		t.Fatalf("write end = %d, want %d", writer.next, 3*1024*1024+4096)
-	}
-	if writer.writes != 3 {
-		t.Fatalf("writes = %d, want 3", writer.writes)
-	}
-}
-
-func TestZeroFillRejectsUnalignedRange(t *testing.T) {
-	if err := zeroFill(&sequentialWriter{}, 1, 4096, 4096); err == nil {
-		t.Fatal("expected unaligned zero-fill to fail")
-	}
-}
-
-type sequentialWriter struct {
-	next   uint64
-	writes int
-}
-
-func (w *sequentialWriter) WriteAt(data []byte, offset int64) (int, error) {
-	if offset < 0 || uint64(offset) != w.next {
-		return 0, fmt.Errorf("write offset %d, want %d", offset, w.next)
-	}
-	if len(data)%4096 != 0 {
-		return 0, fmt.Errorf("write length %d is not aligned", len(data))
-	}
-	w.next += uint64(len(data))
-	w.writes++
-	return len(data), nil
-}
-
-var _ io.WriterAt = (*sequentialWriter)(nil)
-
 type recordingRunner struct {
-	name string
-	args []string
+	name        string
+	args        []string
+	lsblkOutput []byte
 }
 
 func (r *recordingRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	if name == "lsblk" {
+		if r.lsblkOutput != nil {
+			return r.lsblkOutput, nil
+		}
 		return []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","mountpoints":[null],"children":[{"name":"sdb1","path":"/dev/sdb1","type":"part","mountpoints":[null]}]}]}`), nil
 	}
 	r.name = name
@@ -211,5 +142,27 @@ func TestFormatSupportsBtrfsAndF2FS(t *testing.T) {
 				t.Fatalf("format %s args = %q, want %q", test.filesystem, runner.args, test.args)
 			}
 		}
+	}
+}
+
+func TestFormatWholeDiskUsesZonedF2FS(t *testing.T) {
+	runner := &recordingRunner{lsblkOutput: []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","size":100000,"zoned":"host-managed","zone-sz":268435456,"zone-wgran":4096,"fstype":"f2fs","uuid":"existing","mountpoints":[null]}]}`)}
+	manager := &Manager{runner: runner}
+	if err := manager.FormatWholeDisk(context.Background(), "/dev/sdb"); err != nil {
+		t.Fatal(err)
+	}
+	if runner.name != "mkfs.f2fs" || fmt.Sprint(runner.args) != "[-f -m /dev/sdb]" {
+		t.Fatalf("format command = %s %q, want mkfs.f2fs [-f -m /dev/sdb]", runner.name, runner.args)
+	}
+}
+
+func TestFormatRejectsHostManagedWholeDiskOutsideDedicatedOperation(t *testing.T) {
+	runner := &recordingRunner{lsblkOutput: []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","size":100000,"zoned":"host-managed","zone-sz":268435456,"zone-wgran":4096,"fstype":"f2fs","uuid":"existing","mountpoints":[null]}]}`)}
+	manager := &Manager{runner: runner}
+	if err := manager.Format(context.Background(), "/dev/sdb", "f2fs"); err == nil {
+		t.Fatal("expected generic format to reject a host-managed whole disk")
+	}
+	if runner.name != "" {
+		t.Fatalf("unexpected formatter invocation: %s %q", runner.name, runner.args)
 	}
 }

@@ -85,6 +85,10 @@ type FormatInput struct {
 	}
 }
 
+type FormatWholeDiskInput struct {
+	Body DiskConfirmation
+}
+
 type MountInput struct {
 	Body struct {
 		PartitionPath string `json:"partitionPath" minLength:"1"`
@@ -309,6 +313,32 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 			return nil, err
 		}
 		return operation("formatted partition", "", ""), nil
+	})
+	// Host-managed zoned disks cannot expose partitions to Linux. They use one
+	// whole-disk F2FS volume instead.
+	huma.Post(api, "/api/disks/format-f2fs", func(ctx context.Context, input *FormatWholeDiskInput) (*OperationOutput, error) {
+		if err := confirm(input.Body.DiskPath, input.Body.Confirm); err != nil {
+			return nil, badRequest(err)
+		}
+		disk, err := diskByPath(ctx, disks, input.Body.DiskPath)
+		if err != nil {
+			return nil, operationError(logger, "format host-managed disk", err, "disk", input.Body.DiskPath)
+		}
+		var previousUUID string
+		for _, partition := range disk.Partitions {
+			if partition.Path == disk.Path {
+				previousUUID = partition.UUID
+				break
+			}
+		}
+		if err := disks.FormatWholeDisk(ctx, disk.Path); err != nil {
+			return nil, operationError(logger, "format host-managed disk", err, "disk", disk.Path, "filesystem", "f2fs")
+		}
+		if err := database.DeleteVolumeIfExists(ctx, previousUUID); err != nil {
+			logOperationError(logger, "remove volume after whole-disk format", err, "disk", disk.Path)
+			return nil, err
+		}
+		return operation("formatted host-managed disk as f2fs", "", ""), nil
 	})
 
 	huma.Post(api, "/api/volumes/mount", func(ctx context.Context, input *MountInput) (*OperationOutput, error) {

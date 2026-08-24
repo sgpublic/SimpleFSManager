@@ -85,8 +85,34 @@ func (m *Manager) List(ctx context.Context) ([]Disk, error) {
 		}
 		disk.TemperatureCelsius, disk.SmartHealth = m.smartMetadata(ctx, disk.Path)
 		disk.Protected = len(disk.Mountpoints) > 0
-		// Whole-disk mounts have no partition UUID and cannot be managed volumes.
-		disk.System = len(disk.Mountpoints) > 0 && !disk.USB
+		// Host-managed disks are formatted and mounted as whole-disk volumes.
+		disk.System = len(disk.Mountpoints) > 0 && !disk.USB && !isHostManaged(device)
+		if isHostManaged(device) {
+			partition := Partition{
+				Path:                      device.Path,
+				Name:                      device.Name,
+				Number:                    0,
+				SizeBytes:                 device.Size,
+				FileSystem:                device.FSType,
+				UUID:                      device.UUID,
+				Mountpoints:               mountpoints(device.Mountpoints),
+				Zoned:                     device.Zoned,
+				ZoneSizeBytes:             device.ZoneSize,
+				ZoneWriteGranularityBytes: device.ZoneWriteGranularity,
+			}
+			if partition.FileSystem == "" || partition.UUID == "" {
+				m.fillBlockMetadata(ctx, &partition)
+			}
+			if len(partition.Mountpoints) > 0 {
+				managed, err := m.managesUUID(ctx, partition.UUID)
+				if err != nil {
+					return nil, err
+				}
+				disk.System = !managed
+				partition.Usage = usage(partition.Mountpoints[0])
+			}
+			disk.Partitions = append(disk.Partitions, partition)
+		}
 		for _, child := range device.Children {
 			if child.Type != "part" {
 				continue
