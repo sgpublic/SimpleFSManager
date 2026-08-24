@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"io"
 	"testing"
 
 	diskpkg "github.com/diskfs/go-diskfs/disk"
@@ -101,6 +102,78 @@ func TestZonedManualPartitionSizeMustBeAligned(t *testing.T) {
 		t.Fatalf("alignment = %d, want 2048 sectors", alignment)
 	}
 }
+
+func TestGPTBackupStartUsesDefaultAndExistingGPTGeometry(t *testing.T) {
+	const (
+		diskSize  = 1024 * 1024 * 1024
+		blockSize = 4096
+	)
+	start, err := gptBackupStart(diskSize, blockSize, &gpt.Table{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := uint64(diskSize - blockSize - gptPartitionArrayBytes); start != want {
+		t.Fatalf("default backup start = %d, want %d", start, want)
+	}
+
+	table := &gpt.Table{LogicalSectorSize: blockSize}
+	table.Resize(diskSize)
+	start, err = gptBackupStart(diskSize, blockSize, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (table.LastDataSector() + 1) * blockSize; start != want {
+		t.Fatalf("existing backup start = %d, want %d", start, want)
+	}
+}
+
+func TestFinalZoneUsesLastPartialZone(t *testing.T) {
+	start, length, err := finalZone(10*1024+100, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start != 10*1024 || length != 100 {
+		t.Fatalf("final zone = start %d, length %d; want 10240, 100", start, length)
+	}
+}
+
+func TestZeroFillWritesSequentialAlignedChunks(t *testing.T) {
+	writer := &sequentialWriter{next: 4096}
+	if err := zeroFill(writer, 4096, 3*1024*1024, 4096); err != nil {
+		t.Fatal(err)
+	}
+	if writer.next != 3*1024*1024+4096 {
+		t.Fatalf("write end = %d, want %d", writer.next, 3*1024*1024+4096)
+	}
+	if writer.writes != 3 {
+		t.Fatalf("writes = %d, want 3", writer.writes)
+	}
+}
+
+func TestZeroFillRejectsUnalignedRange(t *testing.T) {
+	if err := zeroFill(&sequentialWriter{}, 1, 4096, 4096); err == nil {
+		t.Fatal("expected unaligned zero-fill to fail")
+	}
+}
+
+type sequentialWriter struct {
+	next   uint64
+	writes int
+}
+
+func (w *sequentialWriter) WriteAt(data []byte, offset int64) (int, error) {
+	if offset < 0 || uint64(offset) != w.next {
+		return 0, fmt.Errorf("write offset %d, want %d", offset, w.next)
+	}
+	if len(data)%4096 != 0 {
+		return 0, fmt.Errorf("write length %d is not aligned", len(data))
+	}
+	w.next += uint64(len(data))
+	w.writes++
+	return len(data), nil
+}
+
+var _ io.WriterAt = (*sequentialWriter)(nil)
 
 type recordingRunner struct {
 	name string
