@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sgpublic/simplefsmanager/internal/api"
+	"github.com/sgpublic/simplefsmanager/internal/buildinfo"
 	"github.com/sgpublic/simplefsmanager/internal/storage"
 	"github.com/sgpublic/simplefsmanager/internal/store"
 	"github.com/sgpublic/simplefsmanager/internal/usb"
@@ -22,11 +24,16 @@ import (
 
 func main() {
 	var (
-		address  = flag.String("listen", "0.0.0.0:7376", "HTTP listen address")
-		dataDir  = flag.String("data-dir", "/var/lib/simplefsmanager", "persistent data directory")
-		showHelp = flag.Bool("help", false, "show usage")
+		address     = flag.String("listen", "0.0.0.0:7376", "HTTP listen address")
+		dataDir     = flag.String("data-dir", "/var/lib/simplefsmanager", "persistent data directory")
+		showHelp    = flag.Bool("help", false, "show usage")
+		showVersion = flag.Bool("v", false, "show version")
 	)
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(buildinfo.Version)
+		return
+	}
 	if *showHelp {
 		flag.PrintDefaults()
 		return
