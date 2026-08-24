@@ -137,6 +137,70 @@ func (s *Store) VolumeByUUID(ctx context.Context, uuid string) (Volume, error) {
 	return volume, nil
 }
 
+func (s *Store) Volumes(ctx context.Context) ([]Volume, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT uuid, mount_number, mount_path, auto_mount, device_serial, partition_number
+		FROM volumes ORDER BY mount_number`)
+	if err != nil {
+		return nil, fmt.Errorf("list managed volumes: %w", err)
+	}
+	defer rows.Close()
+
+	volumes := make([]Volume, 0)
+	for rows.Next() {
+		volume, err := scanVolume(rows)
+		if err != nil {
+			return nil, err
+		}
+		volumes = append(volumes, volume)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate managed volumes: %w", err)
+	}
+	return volumes, nil
+}
+
+func (s *Store) ConfigureVolumePath(ctx context.Context, uuid, mountPath string) (Volume, error) {
+	var usedByOther bool
+	if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM volumes WHERE mount_path = ? AND uuid <> ?)`, mountPath, uuid).Scan(&usedByOther); err != nil {
+		return Volume{}, fmt.Errorf("check volume mount path: %w", err)
+	}
+	if usedByOther {
+		return Volume{}, fmt.Errorf("mount path %s is already configured", mountPath)
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE volumes SET mount_path = ?, auto_mount = 1 WHERE uuid = ?`, mountPath, uuid)
+	if err != nil {
+		return Volume{}, fmt.Errorf("update volume mount path: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Volume{}, fmt.Errorf("count updated managed volumes: %w", err)
+	}
+	if affected != 1 {
+		return Volume{}, fmt.Errorf("managed volume %s not found", uuid)
+	}
+	return s.VolumeByUUID(ctx, uuid)
+}
+
+func (s *Store) SetVolumeAutoMount(ctx context.Context, uuid string, enabled bool) (Volume, error) {
+	autoMount := 0
+	if enabled {
+		autoMount = 1
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE volumes SET auto_mount = ? WHERE uuid = ?`, autoMount, uuid)
+	if err != nil {
+		return Volume{}, fmt.Errorf("update volume auto-mount state: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Volume{}, fmt.Errorf("count updated managed volumes: %w", err)
+	}
+	if affected != 1 {
+		return Volume{}, fmt.Errorf("managed volume %s not found", uuid)
+	}
+	return s.VolumeByUUID(ctx, uuid)
+}
+
 func (s *Store) IsManagedUUID(ctx context.Context, uuid string) (bool, error) {
 	if uuid == "" {
 		return false, nil

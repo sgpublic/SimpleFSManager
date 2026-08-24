@@ -40,3 +40,44 @@ func TestConfigureVolumeRejectsDuplicateMountPath(t *testing.T) {
 		t.Fatal("expected duplicate mount path to be rejected")
 	}
 }
+
+func TestConfigureVolumePathUpdatesOnlyExistingVolume(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	registered, _, err := database.RegisterVolume(context.Background(), "missing-uuid", "disk-serial", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured, err := database.ConfigureVolumePath(context.Background(), registered.UUID, "/mnt/missing")
+	if err != nil || configured.MountPath != "/mnt/missing" {
+		t.Fatalf("configured missing volume = %#v, %v", configured, err)
+	}
+	if _, err := database.ConfigureVolumePath(context.Background(), "not-registered", "/mnt/new"); err == nil {
+		t.Fatal("expected an absent volume to be rejected")
+	}
+}
+
+func TestSetVolumeAutoMount(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	volume, _, err := database.RegisterVolume(context.Background(), "uuid", "serial", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume, err = database.SetVolumeAutoMount(context.Background(), volume.UUID, false)
+	if err != nil || volume.AutoMount {
+		t.Fatalf("disabled auto-mount volume = %#v, %v", volume, err)
+	}
+	volume, err = database.SetVolumeAutoMount(context.Background(), volume.UUID, true)
+	if err != nil || !volume.AutoMount {
+		t.Fatalf("enabled auto-mount volume = %#v, %v", volume, err)
+	}
+}

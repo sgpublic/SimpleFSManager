@@ -98,7 +98,8 @@ type MountInput struct {
 
 type MountPathInput struct {
 	Body struct {
-		PartitionPath string `json:"partitionPath" minLength:"1"`
+		PartitionPath string `json:"partitionPath"`
+		PartitionUUID string `json:"partitionUUID"`
 		MountPath     string `json:"mountPath" minLength:"1"`
 		Confirm       string `json:"confirm" minLength:"1"`
 	}
@@ -190,21 +191,13 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		if err != nil {
 			return nil, err
 		}
-		for diskIndex := range found {
-			for partitionIndex := range found[diskIndex].Partitions {
-				partition := &found[diskIndex].Partitions[partitionIndex]
-				if partition.UUID == "" {
-					continue
-				}
-				volume, err := database.VolumeByUUID(ctx, partition.UUID)
-				if err != nil {
-					if strings.Contains(err.Error(), "not found") {
-						continue
-					}
-					return nil, err
-				}
-				partition.MountPath = volume.MountPath
-			}
+		volumes, err := database.Volumes(ctx)
+		if err != nil {
+			return nil, err
+		}
+		found, err = mergeManagedVolumes(ctx, found, volumes, database)
+		if err != nil {
+			return nil, err
 		}
 		output := &DiskListOutput{}
 		output.Body.Disks = found
@@ -353,12 +346,25 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 	})
 
 	huma.Post(api, "/api/volumes/mount-path", func(ctx context.Context, input *MountPathInput) (*OperationOutput, error) {
-		if err := confirm(input.Body.PartitionPath, input.Body.Confirm); err != nil {
+		target := input.Body.PartitionPath
+		if input.Body.PartitionUUID != "" {
+			target = input.Body.PartitionUUID
+		}
+		if target == "" {
+			return nil, badRequest(fmt.Errorf("partition path or UUID is required"))
+		}
+		if err := confirm(target, input.Body.Confirm); err != nil {
 			return nil, badRequest(err)
 		}
-		managed, err := volumes.ConfigureMountPath(ctx, input.Body.PartitionPath, input.Body.MountPath)
+		var managed store.Volume
+		var err error
+		if input.Body.PartitionUUID != "" {
+			managed, err = volumes.ConfigureMissingMountPath(ctx, input.Body.PartitionUUID, input.Body.MountPath)
+		} else {
+			managed, err = volumes.ConfigureMountPath(ctx, input.Body.PartitionPath, input.Body.MountPath)
+		}
 		if err != nil {
-			return nil, operationError(logger, "configure volume mount path", err, "partition", input.Body.PartitionPath, "mountPath", input.Body.MountPath)
+			return nil, operationError(logger, "configure volume mount path", err, "partition", target, "mountPath", input.Body.MountPath)
 		}
 		return operation("configured volume mount path", managed.MountPath, managed.UUID), nil
 	})
@@ -398,6 +404,48 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 
 	router.Handle("/*", frontend)
 	return router
+}
+
+func mergeManagedVolumes(ctx context.Context, disks []storage.Disk, volumes []store.Volume, database *store.Store) ([]storage.Disk, error) {
+	seenVolumes := make(map[string]bool, len(volumes))
+	for diskIndex := range disks {
+		for partitionIndex := range disks[diskIndex].Partitions {
+			partition := &disks[diskIndex].Partitions[partitionIndex]
+			if partition.UUID == "" {
+				continue
+			}
+			volume, err := database.VolumeByUUID(ctx, partition.UUID)
+			if err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					continue
+				}
+				return nil, err
+			}
+			partition.MountPath = volume.MountPath
+			partition.Registered = true
+			seenVolumes[volume.UUID] = true
+		}
+	}
+	for _, volume := range volumes {
+		if seenVolumes[volume.UUID] {
+			continue
+		}
+		disks = append(disks, storage.Disk{
+			Name:      "registered-volume",
+			Serial:    volume.DeviceSerial,
+			Missing:   true,
+			Protected: true,
+			Partitions: []storage.Partition{{
+				Name:       fmt.Sprintf("partition-%d", volume.PartitionNum),
+				Number:     volume.PartitionNum,
+				UUID:       volume.UUID,
+				MountPath:  volume.MountPath,
+				Registered: true,
+				Missing:    true,
+			}},
+		})
+	}
+	return disks, nil
 }
 
 func confirm(target, value string) error {
@@ -492,6 +540,10 @@ func errorCode(err error) string {
 		return "invalid_partition"
 	case strings.Contains(message, "not a physical disk"):
 		return "invalid_disk"
+	case strings.Contains(message, "partition path or UUID is required"):
+		return "invalid_partition"
+	case strings.Contains(message, "managed partition") && strings.Contains(message, "is present"):
+		return "partition_present"
 	case strings.Contains(message, "does not have a GPT"):
 		return "invalid_partition_table"
 	case strings.Contains(message, "managed volume") && strings.Contains(message, "not found"):

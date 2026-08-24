@@ -2,12 +2,17 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sgpublic/simplefsmanager/internal/storage"
+	"github.com/sgpublic/simplefsmanager/internal/store"
 )
 
 func TestLogOperationErrorIncludesOperationContext(t *testing.T) {
@@ -21,6 +26,36 @@ func TestLogOperationErrorIncludesOperationContext(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Errorf("log %q does not contain %q", log, want)
 		}
+	}
+}
+
+func TestMergeManagedVolumesAddsMissingRegisteredPartition(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	missing, _, err := database.RegisterVolume(context.Background(), "missing-uuid", "disk-serial", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present, _, err := database.RegisterVolume(context.Background(), "present-uuid", "disk-serial", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disks, err := mergeManagedVolumes(context.Background(), []storage.Disk{{Partitions: []storage.Partition{{Path: "/dev/sdb1", UUID: present.UUID}}}}, []store.Volume{missing, present}, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(disks) != 2 || !disks[0].Partitions[0].Registered || disks[0].Partitions[0].Missing {
+		t.Fatalf("present partition = %#v", disks)
+	}
+	if !disks[1].Missing || !disks[1].Protected || len(disks[1].Partitions) != 1 {
+		t.Fatalf("missing disk = %#v", disks[1])
+	}
+	partition := disks[1].Partitions[0]
+	if !partition.Missing || !partition.Registered || partition.UUID != missing.UUID || partition.MountPath != missing.MountPath {
+		t.Fatalf("missing partition = %#v", partition)
 	}
 }
 

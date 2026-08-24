@@ -31,6 +31,8 @@ type Partition struct {
 	MountPath                 string           `json:"mountPath,omitempty"`
 	Mountpoints               []string         `json:"mountpoints"`
 	Usage                     *FileSystemUsage `json:"usage,omitempty"`
+	Registered                bool             `json:"registered"`
+	Missing                   bool             `json:"missing"`
 	Zoned                     string           `json:"zoned,omitempty"`
 	ZoneSizeBytes             uint64           `json:"zoneSizeBytes,omitempty"`
 	ZoneWriteGranularityBytes uint64           `json:"zoneWriteGranularityBytes,omitempty"`
@@ -52,6 +54,7 @@ type Disk struct {
 	SmartHealth               *bool       `json:"smartHealth,omitempty"`
 	Mountpoints               []string    `json:"mountpoints"`
 	Partitions                []Partition `json:"partitions"`
+	Missing                   bool        `json:"missing"`
 	Zoned                     string      `json:"zoned,omitempty"`
 	ZoneSizeBytes             uint64      `json:"zoneSizeBytes,omitempty"`
 	ZoneWriteGranularityBytes uint64      `json:"zoneWriteGranularityBytes,omitempty"`

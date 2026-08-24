@@ -29,6 +29,7 @@ type MountPathDialog = {
   kind: "mountPath";
   target: string;
   currentPath: string;
+  missing: boolean;
 };
 type CreateDialog = {
   kind: "create";
@@ -194,27 +195,31 @@ export function Dashboard({
                         )}
                       </div>
                       <p className="mt-2 font-mono text-xs text-slate-400">
-                        {disk.path}
+                        {disk.path || t("dashboard.registeredVolume")}
                         {disk.serial ? ` · ${disk.serial}` : ""}
                       </p>
                     </div>
                     <span
                       className={
-                        disk.system
-                          ? "flex items-center gap-1.5 text-xs text-rose-300"
-                          : disk.protected
-                            ? "flex items-center gap-1.5 text-xs text-amber-300"
-                            : "text-xs text-emerald-300"
+                        disk.missing
+                          ? "flex items-center gap-1.5 text-xs text-amber-300"
+                          : disk.system
+                            ? "flex items-center gap-1.5 text-xs text-rose-300"
+                            : disk.protected
+                              ? "flex items-center gap-1.5 text-xs text-amber-300"
+                              : "text-xs text-emerald-300"
                       }
                     >
-                      {(disk.system || disk.protected) && (
+                      {(disk.missing || disk.system || disk.protected) && (
                         <ShieldAlert size={14} />
                       )}
-                      {disk.system
-                        ? t("dashboard.systemDisk")
-                        : disk.protected
-                          ? t("dashboard.mounted")
-                          : t("dashboard.available")}
+                      {disk.missing
+                        ? t("dashboard.missing")
+                        : disk.system
+                          ? t("dashboard.systemDisk")
+                          : disk.protected
+                            ? t("dashboard.mounted")
+                            : t("dashboard.available")}
                     </span>
                   </div>
                   <div className="mt-5 grid grid-cols-2 gap-4 text-sm sm:hidden">
@@ -284,7 +289,7 @@ export function Dashboard({
                       onDetails={() => setSmartDiskPath(disk.path)}
                     />
                   </div>
-                  {!disk.usb && (
+                  {!disk.usb && !disk.missing && (
                     <div className="mt-5 flex flex-wrap gap-2">
                       {!disk.protected && disk.reclaimable ? (
                         <DangerButton
@@ -381,12 +386,12 @@ export function Dashboard({
                             : 0;
                         return (
                           <div
-                            key={partition.path}
+                            key={partition.path || partition.uuid}
                             className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/70 py-3 last:border-0"
                           >
                             <div className="min-w-0 flex-1">
                               <p className="font-mono text-sm text-slate-300">
-                                {partition.path}
+                                {partition.path || partition.uuid}
                               </p>
                               <p className="mt-1 text-xs text-slate-400">
                                 {partition.fileSystem ||
@@ -447,6 +452,7 @@ export function Dashboard({
                                 <ManagedPartitionActions
                                   diskPath={disk.path}
                                   partition={partition}
+                                  missing={partition.missing}
                                   system={disk.system}
                                   confirm={confirm}
                                   openMountPath={(target, currentPath) =>
@@ -454,6 +460,7 @@ export function Dashboard({
                                       kind: "mountPath",
                                       target,
                                       currentPath,
+                                      missing: partition.missing,
                                     })
                                   }
                                   openFormat={(target) =>
@@ -588,6 +595,7 @@ function USBPartitionActions({
 function ManagedPartitionActions({
   diskPath,
   partition,
+  missing,
   system,
   confirm,
   openMountPath,
@@ -602,6 +610,7 @@ function ManagedPartitionActions({
     mountPath?: string;
     mountpoints: string[];
   };
+  missing: boolean;
   system: boolean;
   confirm: (
     target: string,
@@ -612,6 +621,16 @@ function ManagedPartitionActions({
   openFormat: (target: string) => void;
 }) {
   const { t } = useTranslation();
+  if (missing)
+    return (
+      <ActionButton
+        onClick={() =>
+          openMountPath(partition.uuid, partition.mountPath ?? "")
+        }
+      >
+        {t("dashboard.modifyMountPath")}
+      </ActionButton>
+    );
   if (partition.mountpoints?.length > 0)
     return partition.mountPath &&
       partition.mountpoints.includes(partition.mountPath) ? (
@@ -780,7 +799,9 @@ function OperationDialog({
       onSubmit({
         path: "/api/volumes/mount-path",
         body: {
-          partitionPath: dialog.target,
+          ...(dialog.missing
+            ? { partitionUUID: dialog.target }
+            : { partitionPath: dialog.target }),
           mountPath: mountPath.trim(),
           confirm: dialog.target,
         },

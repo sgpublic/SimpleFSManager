@@ -37,7 +37,7 @@ func (m *Manager) Mount(ctx context.Context, partitionPath string) (store.Volume
 	if err := m.storage.Mount(ctx, partitionPath, volume.MountPath, partition.FileSystem); err != nil {
 		return store.Volume{}, err
 	}
-	return volume, nil
+	return m.store.SetVolumeAutoMount(ctx, volume.UUID, true)
 }
 
 func (m *Manager) ConfigureMountPath(ctx context.Context, partitionPath, mountPath string) (store.Volume, error) {
@@ -60,6 +60,28 @@ func (m *Manager) ConfigureMountPath(ctx context.Context, partitionPath, mountPa
 	return m.store.ConfigureVolume(ctx, partition.UUID, diskIdentity(disk), partition.Number, mountPath)
 }
 
+func (m *Manager) ConfigureMissingMountPath(ctx context.Context, uuid, mountPath string) (store.Volume, error) {
+	if err := storage.ValidateMountPath(mountPath); err != nil {
+		return store.Volume{}, fmt.Errorf("invalid mount path: %w", err)
+	}
+	disks, err := m.storage.List(ctx)
+	if err != nil {
+		return store.Volume{}, err
+	}
+	for _, disk := range disks {
+		for _, partition := range disk.Partitions {
+			if partition.UUID == uuid {
+				return store.Volume{}, fmt.Errorf("managed partition %s is present; use its device path", uuid)
+			}
+		}
+	}
+	volume, err := m.store.VolumeByUUID(ctx, uuid)
+	if err != nil {
+		return store.Volume{}, err
+	}
+	return m.store.ConfigureVolumePath(ctx, volume.UUID, mountPath)
+}
+
 func (m *Manager) Unmount(ctx context.Context, uuid string) (store.Volume, error) {
 	volume, err := m.store.VolumeByUUID(ctx, uuid)
 	if err != nil {
@@ -68,7 +90,7 @@ func (m *Manager) Unmount(ctx context.Context, uuid string) (store.Volume, error
 	if err := m.storage.Unmount(volume.MountPath); err != nil {
 		return store.Volume{}, err
 	}
-	return volume, nil
+	return m.store.SetVolumeAutoMount(ctx, volume.UUID, false)
 }
 
 func (m *Manager) Recover(ctx context.Context) error {
