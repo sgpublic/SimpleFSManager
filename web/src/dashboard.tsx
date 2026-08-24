@@ -1066,7 +1066,7 @@ function SmartMetric({
         ? "text-emerald-300"
         : "text-rose-300";
   return (
-    <div className="flex items-end gap-2">
+    <div className="flex items-start gap-2">
       <Metric
         label="SMART"
         value={
