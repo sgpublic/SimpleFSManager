@@ -44,13 +44,19 @@ func main() {
 		logger.Error("create data directory", "error", err)
 		os.Exit(1)
 	}
+	logger.Info("data directory ready", "path", *dataDir)
 
 	db, err := store.Open(filepath.Join(*dataDir, "simplefsmanager.db"))
 	if err != nil {
 		logger.Error("open database", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Error("close database", "error", err)
+		}
+	}()
+	logger.Info("database opened", "path", filepath.Join(*dataDir, "simplefsmanager.db"))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -59,9 +65,13 @@ func main() {
 	usbVolumes := usb.New(disks)
 	if err := volumes.Recover(ctx); err != nil {
 		logger.Error("restore managed volumes", "error", err)
+	} else {
+		logger.Info("managed volumes restored")
 	}
 	if err := usbVolumes.Reconcile(ctx, ""); err != nil {
 		logger.Error("mount USB volumes", "error", err)
+	} else {
+		logger.Info("USB volumes reconciled")
 	}
 	go func() {
 		if err := storage.WatchUdev(ctx, func(event storage.UdevEvent) {
@@ -70,6 +80,8 @@ func main() {
 				time.Sleep(500 * time.Millisecond)
 				if err := volumes.Recover(ctx); err != nil {
 					logger.Error("restore managed volumes after udev event", "error", err)
+				} else {
+					logger.Info("managed volumes restored after udev event")
 				}
 				addedDiskPath := ""
 				if event.Action == "add" && event.Devtype == "disk" {
@@ -77,6 +89,8 @@ func main() {
 				}
 				if err := usbVolumes.Reconcile(ctx, addedDiskPath); err != nil {
 					logger.Error("mount USB volumes after udev event", "error", err)
+				} else {
+					logger.Info("USB volumes reconciled after udev event")
 				}
 			}()
 		}); err != nil && !errors.Is(err, storage.ErrUdevUnavailable) {

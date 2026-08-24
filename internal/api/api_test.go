@@ -22,10 +22,13 @@ func TestLogOperationErrorIncludesOperationContext(t *testing.T) {
 	logOperationError(logger, "format partition", errors.New("mkfs.ext4 failed"), "partition", "/dev/sdb1", "filesystem", "ext4")
 
 	log := output.String()
-	for _, want := range []string{"storage operation failed", "operation=\"format partition\"", "error=\"mkfs.ext4 failed\"", "partition=/dev/sdb1", "filesystem=ext4"} {
+	for _, want := range []string{"operation failed", "operation=\"format partition\"", "error=\"mkfs.ext4 failed\"", "partition=/dev/sdb1", "filesystem=ext4"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log %q does not contain %q", log, want)
 		}
+	}
+	if strings.Contains(log, "stack=") {
+		t.Errorf("ordinary error log unexpectedly contains a stack: %q", log)
 	}
 }
 
@@ -66,8 +69,37 @@ func TestOperationErrorLogsOnlyInternalErrors(t *testing.T) {
 	operationError(logger, "format partition", errors.New("mkfs.ext4 failed"), "partition", "/dev/sdb1")
 	operationError(logger, "format partition", errors.New("refusing to modify mounted partition /dev/sdb1"), "partition", "/dev/sdb1")
 
-	if logs := strings.Count(output.String(), "storage operation failed"); logs != 1 {
+	if logs := strings.Count(output.String(), "operation failed"); logs != 1 {
 		t.Fatalf("got %d storage failure logs, want 1: %s", logs, output.String())
+	}
+}
+
+func TestLogOperationSuccessIncludesOperationContext(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, nil))
+
+	logOperationSuccess(logger, "mount volume", "partition", "/dev/sdb1", "uuid", "volume-uuid")
+
+	for _, want := range []string{"operation completed", "operation=\"mount volume\"", "partition=/dev/sdb1", "uuid=volume-uuid"} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("log %q does not contain %q", output.String(), want)
+		}
+	}
+}
+
+func TestRequestErrorLoggerLogsClientAndServerErrors(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, nil))
+	handler := requestErrorLogger(logger)(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadRequest)
+	}))
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/partitions", nil))
+
+	for _, want := range []string{"request failed", "method=POST", "path=/api/partitions", "status=400"} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("log %q does not contain %q", output.String(), want)
+		}
 	}
 }
 

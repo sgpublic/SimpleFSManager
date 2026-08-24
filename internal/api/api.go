@@ -134,12 +134,14 @@ type loginRequest struct {
 
 func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usbVolumes *usb.Manager, frontend http.Handler) http.Handler {
 	router := chi.NewRouter()
+	router.Use(requestErrorLogger(logger))
 	router.Use(recoverer(logger))
 	authentication := auth.New(database)
 	router.Use(authentication.Middleware)
 	router.Get("/api/auth/status", func(writer http.ResponseWriter, request *http.Request) {
 		status, err := authentication.Status(request.Context(), request)
 		if err != nil {
+			logOperationError(logger, "get authentication status", err)
 			writeError(writer, http.StatusInternalServerError, err)
 			return
 		}
@@ -153,10 +155,14 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		}
 		token, err := authentication.Bootstrap(request.Context(), input.Username, input.SystemPassword, input.ProjectPassword)
 		if err != nil {
+			if errorCode(err) == "internal_error" {
+				logOperationError(logger, "bootstrap authentication", err)
+			}
 			writeError(writer, http.StatusUnauthorized, err)
 			return
 		}
 		http.SetCookie(writer, auth.SessionCookie(token))
+		logOperationSuccess(logger, "bootstrap authentication")
 		writeJSON(writer, http.StatusCreated, auth.Status{Authenticated: true, Username: input.Username})
 	})
 	router.Post("/api/auth/login", func(writer http.ResponseWriter, request *http.Request) {
@@ -167,15 +173,20 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		}
 		token, err := authentication.Login(request.Context(), input.Username, input.Password)
 		if err != nil {
+			if errorCode(err) == "internal_error" {
+				logOperationError(logger, "log in", err)
+			}
 			writeError(writer, http.StatusUnauthorized, err)
 			return
 		}
 		http.SetCookie(writer, auth.SessionCookie(token))
+		logOperationSuccess(logger, "log in")
 		writeJSON(writer, http.StatusOK, auth.Status{Authenticated: true, Username: input.Username})
 	})
 	router.Post("/api/auth/logout", func(writer http.ResponseWriter, request *http.Request) {
 		authentication.Logout(request.Context(), request)
 		http.SetCookie(writer, auth.ExpiredSessionCookie())
+		logOperationSuccess(logger, "log out")
 		writer.WriteHeader(http.StatusNoContent)
 	})
 	api := humachi.New(router, huma.DefaultConfig("SimpleFSManager API", buildinfo.Version))
@@ -189,14 +200,17 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 	huma.Get(api, "/api/disks", func(ctx context.Context, _ *struct{}) (*DiskListOutput, error) {
 		found, err := disks.List(ctx)
 		if err != nil {
+			logOperationError(logger, "list disks", err)
 			return nil, err
 		}
 		volumes, err := database.Volumes(ctx)
 		if err != nil {
+			logOperationError(logger, "list managed volumes", err)
 			return nil, err
 		}
 		found, err = mergeManagedVolumes(ctx, found, volumes, database)
 		if err != nil {
+			logOperationError(logger, "merge managed volumes", err)
 			return nil, err
 		}
 		output := &DiskListOutput{}
@@ -225,6 +239,7 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 			logOperationError(logger, "remove volumes after GPT initialization", err, "disk", input.Body.DiskPath)
 			return nil, err
 		}
+		logOperationSuccess(logger, "initialize GPT", "disk", input.Body.DiskPath, "rebootRequired", rebootRequired)
 		return operation("initialized empty GPT", "", "", rebootRequired), nil
 	})
 
@@ -248,6 +263,7 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 			logOperationError(logger, "remove volumes after reclaiming disk", err, "disk", input.Body.DiskPath)
 			return nil, err
 		}
+		logOperationSuccess(logger, "reclaim disk", "disk", input.Body.DiskPath, "rebootRequired", rebootRequired)
 		return operation("reclaimed disk with empty GPT", "", "", rebootRequired), nil
 	})
 
@@ -258,6 +274,7 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		if err := disks.Reboot(ctx); err != nil {
 			return nil, operationError(logger, "restart system", err)
 		}
+		logOperationSuccess(logger, "restart system")
 		return operation("restarting system", "", "", false), nil
 	})
 
@@ -267,8 +284,9 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		}
 		index, err := disks.CreatePartition(ctx, input.Body.DiskPath, input.Body.SizeBytes, input.Body.UseLargestFree, input.Body.Name)
 		if err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "create partition", err, "disk", input.Body.DiskPath)
 		}
+		logOperationSuccess(logger, "create partition", "disk", input.Body.DiskPath, "partitionNumber", index)
 		return operation(fmt.Sprintf("created partition %d", index), "", ""), nil
 	})
 
@@ -287,6 +305,7 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 			logOperationError(logger, "remove volume after partition deletion", err, "disk", disk.Path, "partition", partition.Path)
 			return nil, err
 		}
+		logOperationSuccess(logger, "delete partition", "disk", disk.Path, "partition", partition.Path, "partitionNumber", input.Body.PartitionNumber)
 		return operation("deleted partition", "", ""), nil
 	})
 
@@ -305,6 +324,7 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 			logOperationError(logger, "remove volume after formatting", err, "partition", partition.Path)
 			return nil, err
 		}
+		logOperationSuccess(logger, "format partition", "partition", input.Body.PartitionPath, "filesystem", input.Body.FileSystem)
 		return operation("formatted partition", "", ""), nil
 	})
 	// Host-managed zoned disks cannot expose partitions to Linux. They use one
@@ -331,6 +351,7 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 			logOperationError(logger, "remove volume after whole-disk format", err, "disk", disk.Path)
 			return nil, err
 		}
+		logOperationSuccess(logger, "format host-managed disk", "disk", disk.Path, "filesystem", "f2fs")
 		return operation("formatted host-managed disk as f2fs", "", ""), nil
 	})
 
@@ -340,8 +361,9 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		}
 		managed, err := volumes.Mount(ctx, input.Body.PartitionPath)
 		if err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "mount volume", err, "partition", input.Body.PartitionPath)
 		}
+		logOperationSuccess(logger, "mount volume", "partition", input.Body.PartitionPath, "mountPath", managed.MountPath, "uuid", managed.UUID)
 		return operation("mounted volume", managed.MountPath, managed.UUID), nil
 	})
 
@@ -366,6 +388,7 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		if err != nil {
 			return nil, operationError(logger, "configure volume mount path", err, "partition", target, "mountPath", input.Body.MountPath)
 		}
+		logOperationSuccess(logger, "configure volume mount path", "partition", target, "mountPath", managed.MountPath, "uuid", managed.UUID)
 		return operation("configured volume mount path", managed.MountPath, managed.UUID), nil
 	})
 
@@ -375,8 +398,9 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		}
 		managed, err := volumes.Unmount(ctx, input.Body.UUID)
 		if err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "unmount volume", err, "uuid", input.Body.UUID)
 		}
+		logOperationSuccess(logger, "unmount volume", "mountPath", managed.MountPath, "uuid", managed.UUID)
 		return operation("unmounted volume", managed.MountPath, managed.UUID), nil
 	})
 
@@ -386,8 +410,9 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		}
 		target, err := usbVolumes.Mount(ctx, input.Body.PartitionPath)
 		if err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "mount USB partition", err, "partition", input.Body.PartitionPath)
 		}
+		logOperationSuccess(logger, "mount USB partition", "partition", input.Body.PartitionPath, "mountPath", target)
 		return operation("mounted USB partition", target, ""), nil
 	})
 
@@ -397,8 +422,9 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		}
 		target, err := usbVolumes.Unmount(ctx, input.Body.PartitionPath)
 		if err != nil {
-			return nil, badRequest(err)
+			return nil, operationError(logger, "unmount USB partition", err, "partition", input.Body.PartitionPath)
 		}
+		logOperationSuccess(logger, "unmount USB partition", "partition", input.Body.PartitionPath, "mountPath", target)
 		return operation("unmounted USB partition", target, ""), nil
 	})
 
@@ -591,7 +617,40 @@ func errorCode(err error) string {
 }
 
 func logOperationError(logger *slog.Logger, operation string, err error, args ...any) {
-	logger.Error("storage operation failed", append([]any{"operation", operation, "error", err}, args...)...)
+	logger.Error("operation failed", append([]any{"operation", operation, "error", err}, args...)...)
+}
+
+func logOperationSuccess(logger *slog.Logger, operation string, args ...any) {
+	logger.Info("operation completed", append([]any{"operation", operation}, args...)...)
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (writer *statusWriter) WriteHeader(status int) {
+	writer.status = status
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *statusWriter) Write(body []byte) (int, error) {
+	if writer.status == 0 {
+		writer.status = http.StatusOK
+	}
+	return writer.ResponseWriter.Write(body)
+}
+
+func requestErrorLogger(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			response := &statusWriter{ResponseWriter: writer}
+			next.ServeHTTP(response, request)
+			if response.status >= http.StatusBadRequest {
+				logger.Error("request failed", "method", request.Method, "path", request.URL.Path, "status", response.status)
+			}
+		})
+	}
 }
 
 func recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
