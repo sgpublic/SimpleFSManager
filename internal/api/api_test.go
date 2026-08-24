@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sgpublic/simplefsmanager/internal/storage"
 	"github.com/sgpublic/simplefsmanager/internal/store"
+	"github.com/sgpublic/simplefsmanager/internal/usb"
 )
 
 func TestLogOperationErrorIncludesOperationContext(t *testing.T) {
@@ -99,6 +101,44 @@ func TestRequestErrorLoggerLogsClientAndServerErrors(t *testing.T) {
 	for _, want := range []string{"request failed", "method=POST", "path=/api/partitions", "status=400"} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("log %q does not contain %q", output.String(), want)
+		}
+	}
+}
+
+func TestMountPathOpenAPIAllowsUUIDWithoutPartitionPath(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	disks := storage.New(database.IsManagedUUID)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, usb.New(disks), http.NotFoundHandler())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("OpenAPI status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+
+	var document struct {
+		Paths map[string]struct {
+			Post struct {
+				RequestBody struct {
+					Content map[string]struct {
+						Schema struct {
+							Required []string `json:"required"`
+						} `json:"schema"`
+					} `json:"content"`
+				} `json:"requestBody"`
+			} `json:"post"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range document.Paths["/api/volumes/mount-path"].Post.RequestBody.Content["application/json"].Schema.Required {
+		if field == "partitionPath" || field == "partitionUUID" {
+			t.Fatalf("mount-path API unexpectedly requires %q", field)
 		}
 	}
 }

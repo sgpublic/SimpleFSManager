@@ -98,8 +98,8 @@ type MountInput struct {
 
 type MountPathInput struct {
 	Body struct {
-		PartitionPath string `json:"partitionPath"`
-		PartitionUUID string `json:"partitionUUID"`
+		PartitionPath string `json:"partitionPath,omitempty"`
+		PartitionUUID string `json:"partitionUUID,omitempty"`
 		MountPath     string `json:"mountPath" minLength:"1"`
 		Confirm       string `json:"confirm" minLength:"1"`
 	}
