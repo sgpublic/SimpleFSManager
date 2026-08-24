@@ -4,7 +4,7 @@ Section: admin
 Priority: optional
 Architecture: amd64
 Maintainer: Haven Madray <sgpublic2002@gmail.com>
-Depends: libpam0g, libudev1, util-linux, e2fsprogs, xfsprogs, smartmontools
+Depends: libpam0g, libudev1, util-linux, e2fsprogs, xfsprogs, btrfs-progs, f2fs-tools, smartmontools
 Description: Single-user Linux disk management service
  SimpleFSManager provides a web interface for managing physical disks,
  partitions, filesystems, managed volumes, and USB storage.
