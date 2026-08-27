@@ -42,6 +42,16 @@ type DiskListOutput struct {
 	}
 }
 
+type SmartInput struct {
+	DiskPath string `query:"diskPath" minLength:"1"`
+}
+
+type SmartOutput struct {
+	Body struct {
+		Data json.RawMessage `json:"data"`
+	}
+}
+
 type DiskConfirmation struct {
 	DiskPath string `json:"diskPath" minLength:"1"`
 	Confirm  string `json:"confirm" minLength:"1"`
@@ -215,6 +225,15 @@ func New(database *store.Store, logger *slog.Logger, disks *storage.Manager, usb
 		}
 		output := &DiskListOutput{}
 		output.Body.Disks = found
+		return output, nil
+	})
+	huma.Get(api, "/api/disks/smart", func(ctx context.Context, input *SmartInput) (*SmartOutput, error) {
+		data, err := disks.Smart(ctx, input.DiskPath)
+		if err != nil {
+			return nil, operationError(logger, "read SMART details", err, "disk", input.DiskPath)
+		}
+		output := &SmartOutput{}
+		output.Body.Data = data
 		return output, nil
 	})
 	volumes := volume.New(database, disks)

@@ -1191,15 +1191,174 @@ function SmartDetailsDialog({
               {t("dashboard.smartUnavailable")}
             </p>
           )}
-          {details.data && (
-            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-5 text-slate-300">
-              {JSON.stringify(details.data, null, 2)}
-            </pre>
-          )}
+          {details.data && <SmartDetails data={details.data} />}
         </div>
       </section>
     </div>
   );
+}
+
+function SmartDetails({ data }: { data: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const nvme = smartObject(data, "nvme_smart_health_information_log");
+  const ata = smartObject(data, "ata_smart_attributes");
+  const criticalWarning = smartNumber(nvme, "critical_warning");
+  const reportedHealth = smartBoolean(data, "smart_status", "passed");
+  const health = reportedHealth ?? (criticalWarning === undefined ? undefined : criticalWarning === 0);
+  const reportedTemperature =
+    smartNumber(data, "temperature", "current") ??
+    smartNumber(nvme, "temperature") ??
+    ataTemperature(ata);
+  const temperature =
+    reportedTemperature !== undefined && reportedTemperature > 200
+      ? reportedTemperature - 273
+      : reportedTemperature;
+  const powerOnHours =
+    smartNumber(data, "power_on_time", "hours") ?? smartNumber(nvme, "power_on_hours");
+  const powerCycles =
+    smartNumber(data, "power_cycle_count") ?? smartNumber(nvme, "power_cycles");
+  const model = smartText(data, "model_name") ?? smartText(data, "device", "model_name");
+  const serial = smartText(data, "serial_number") ?? smartText(data, "device", "serial_number");
+  const firmware = smartText(data, "firmware_version") ?? smartText(data, "device", "revision");
+  const protocol = smartText(data, "device", "protocol");
+  const ataRisks = ataRiskMetrics(ata, t);
+  const nvmeRisks = nvmeRiskMetrics(nvme, t);
+  const usage = [
+    smartMetric(t("dashboard.smartPowerOnHours"), powerOnHours, "neutral"),
+    smartMetric(t("dashboard.smartPowerCycles"), powerCycles, "neutral"),
+    nvme && smartMetric(t("dashboard.smartLifeUsed"), smartNumber(nvme, "percentage_used"), percentageUsedTone(smartNumber(nvme, "percentage_used")), "%"),
+    nvme && smartMetric(t("dashboard.smartSpareAvailable"), smartNumber(nvme, "available_spare"), spareTone(smartNumber(nvme, "available_spare")), "%"),
+  ].filter((metric): metric is SmartMetricValue => Boolean(metric));
+  const device = [
+    smartMetric(t("dashboard.smartModel"), model, "neutral"),
+    smartMetric(t("dashboard.smartSerial"), serial, "neutral"),
+    smartMetric(t("dashboard.smartFirmware"), firmware, "neutral"),
+    smartMetric(t("dashboard.smartProtocol"), protocol, "neutral"),
+  ].filter((metric): metric is SmartMetricValue => Boolean(metric));
+
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <SmartDetail
+          label={t("dashboard.smartOverallHealth")}
+          value={
+            health === undefined
+              ? t("dashboard.smartNotReported")
+              : health
+                ? t("dashboard.smartHealthy")
+                : t("dashboard.smartFailed")
+          }
+          tone={health === undefined ? "neutral" : health ? "good" : "critical"}
+        />
+        <SmartDetail
+          label={t("dashboard.temperature")}
+          value={temperature === undefined ? t("dashboard.smartNotReported") : `${Math.round(temperature)} °C`}
+          tone={temperature === undefined ? "neutral" : temperature >= 60 ? "critical" : temperature >= 50 ? "warning" : "good"}
+        />
+      </div>
+      {device.length > 0 && <SmartSection title={t("dashboard.smartDeviceInfo")} metrics={device} />}
+      {usage.length > 0 && <SmartSection title={t("dashboard.smartUsage")} metrics={usage} />}
+      {nvmeRisks.length > 0 && <SmartSection title={t("dashboard.smartNvmeHealth")} metrics={nvmeRisks} />}
+      {ataRisks.length > 0 && <SmartSection title={t("dashboard.smartAtaHealth")} metrics={ataRisks} />}
+    </div>
+  );
+}
+
+type SmartTone = "neutral" | "good" | "warning" | "critical";
+type SmartMetricValue = { label: string; value: string; tone: SmartTone };
+
+function SmartSection({ title, metrics }: { title: string; metrics: SmartMetricValue[] }) {
+  return (
+    <section>
+      <h3 className="mb-2 text-sm font-medium text-slate-200">{title}</h3>
+      <div className="grid gap-3 sm:grid-cols-2">{metrics.map((metric) => <SmartDetail key={metric.label} {...metric} />)}</div>
+    </section>
+  );
+}
+
+function SmartDetail({ label, value, tone }: SmartMetricValue) {
+  const color = { neutral: "text-slate-200", good: "text-emerald-300", warning: "text-amber-300", critical: "text-rose-300" }[tone];
+  return <div className="rounded-lg border border-slate-800 bg-slate-900 p-3"><p className="text-xs uppercase tracking-wide text-slate-500">{label}</p><p className={`mt-1 break-words text-sm font-medium ${color}`}>{value}</p></div>;
+}
+
+function smartObject(data: unknown, ...path: string[]) {
+	const value = smartValue(data, ...path);
+	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function smartValue(data: unknown, ...path: string[]) {
+  let value: unknown = data;
+  for (const key of path) value = value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
+	return value;
+}
+
+function smartNumber(data: unknown, ...path: string[]) {
+  const value = smartValue(data, ...path);
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function smartText(data: unknown, ...path: string[]) {
+  const value = smartValue(data, ...path);
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function smartBoolean(data: unknown, ...path: string[]) {
+  const value = smartValue(data, ...path);
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function ataTemperature(ata?: Record<string, unknown>) {
+  for (const attribute of smartArray(ata, "table")) {
+    if (smartNumber(attribute, "id") === 190 || smartNumber(attribute, "id") === 194) return smartNumber(attribute, "raw", "value");
+  }
+}
+
+function ataRiskMetrics(ata: Record<string, unknown> | undefined, t: (key: string) => string) {
+  return [
+    ataAttribute(ata, 5, t("dashboard.smartReallocatedSectors"), "critical"),
+    ataAttribute(ata, 197, t("dashboard.smartPendingSectors"), "critical"),
+    ataAttribute(ata, 198, t("dashboard.smartUncorrectableSectors"), "critical"),
+    ataAttribute(ata, 199, t("dashboard.smartCrcErrors"), "warning"),
+    ataAttribute(ata, 188, t("dashboard.smartCommandTimeouts"), "warning"),
+  ].filter((metric): metric is SmartMetricValue => Boolean(metric));
+}
+
+function ataAttribute(ata: Record<string, unknown> | undefined, id: number, label: string, nonZeroTone: SmartTone) {
+  for (const attribute of smartArray(ata, "table")) {
+    if (smartNumber(attribute, "id") === id) {
+      const value = smartNumber(attribute, "raw", "value");
+      return smartMetric(label, value, value && value > 0 ? nonZeroTone : "good");
+    }
+  }
+}
+
+function nvmeRiskMetrics(nvme: Record<string, unknown> | undefined, t: (key: string) => string) {
+  return [
+    smartMetric(t("dashboard.smartCriticalWarnings"), smartNumber(nvme, "critical_warning"), smartNumber(nvme, "critical_warning") ? "critical" : "good"),
+    smartMetric(t("dashboard.smartIntegrityErrors"), smartNumber(nvme, "media_and_data_integrity_errors"), smartNumber(nvme, "media_and_data_integrity_errors") ? "critical" : "good"),
+    smartMetric(t("dashboard.smartErrorLogEntries"), smartNumber(nvme, "num_err_log_entries"), smartNumber(nvme, "num_err_log_entries") ? "warning" : "good"),
+    smartMetric(t("dashboard.smartUnsafeShutdowns"), smartNumber(nvme, "unsafe_shutdowns"), smartNumber(nvme, "unsafe_shutdowns") ? "warning" : "good"),
+  ].filter((metric): metric is SmartMetricValue => Boolean(metric));
+}
+
+function smartArray(data: Record<string, unknown> | undefined, key: string) {
+  const value = data?.[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function smartMetric(label: string, value: number | string | undefined, tone: SmartTone, suffix = "") {
+  if (value === undefined) return undefined;
+  return { label, value: typeof value === "number" ? `${value.toLocaleString()}${suffix}` : value, tone };
+}
+
+function percentageUsedTone(value: number | undefined): SmartTone {
+  if (value === undefined || value < 90) return "good";
+  return value >= 100 ? "critical" : "warning";
+}
+
+function spareTone(value: number | undefined): SmartTone {
+  if (value === undefined || value > 20) return "good";
+  return value <= 10 ? "critical" : "warning";
 }
 function ActionButton({
   children,

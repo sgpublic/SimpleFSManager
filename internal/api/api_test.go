@@ -143,6 +143,26 @@ func TestMountPathOpenAPIAllowsUUIDWithoutPartitionPath(t *testing.T) {
 	}
 }
 
+func TestSmartDetailsRouteRequiresDiskPath(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	disks := storage.New(database.IsManagedUUID)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, usb.New(disks), http.NotFoundHandler())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/disks/smart", nil))
+
+	if response.Code == http.StatusNotFound {
+		t.Fatalf("SMART details route returned 404 instead of validating diskPath")
+	}
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("SMART details status = %d, want %d: %s", response.Code, http.StatusUnprocessableEntity, response.Body.String())
+	}
+}
+
 func TestRecovererLogsPanic(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&output, nil))
