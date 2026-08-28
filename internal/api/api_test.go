@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -11,7 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sgpublic/simplefsmanager/internal/auth"
 	"github.com/sgpublic/simplefsmanager/internal/storage"
 	"github.com/sgpublic/simplefsmanager/internal/store"
 	"github.com/sgpublic/simplefsmanager/internal/usb"
@@ -150,16 +154,45 @@ func TestSmartDetailsRouteRequiresDiskPath(t *testing.T) {
 	}
 	defer database.Close()
 
+	user, err := database.CreateAdministrator(context.Background(), "test-user", "password-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "test-session"
+	tokenSum := sha256.Sum256([]byte(token))
+	if err := database.CreateSession(context.Background(), base64.RawURLEncoding.EncodeToString(tokenSum[:]), user.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	disks := storage.New(database.IsManagedUUID)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, usb.New(disks), http.NotFoundHandler())
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/disks/smart", nil)
+	request.AddCookie(auth.SessionCookie(token))
+	handler.ServeHTTP(response, request)
+
+	if response.Code == http.StatusNotFound {
+		t.Fatalf("SMART details route returned 404 instead of validating diskPath")
+	}
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("SMART details status = %d, want %d: %s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+}
+
+func TestSmartDetailsRouteRequiresAuthentication(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
 	disks := storage.New(database.IsManagedUUID)
 	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, usb.New(disks), http.NotFoundHandler())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/disks/smart", nil))
 
-	if response.Code == http.StatusNotFound {
-		t.Fatalf("SMART details route returned 404 instead of validating diskPath")
-	}
-	if response.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("SMART details status = %d, want %d: %s", response.Code, http.StatusUnprocessableEntity, response.Body.String())
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("SMART details status = %d, want %d: %s", response.Code, http.StatusUnauthorized, response.Body.String())
 	}
 }
 
