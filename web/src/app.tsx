@@ -52,7 +52,6 @@ export function App() {
     return (
       <Login
         version={version}
-        username={status.data?.username ?? ""}
         onComplete={() => void status.refetch()}
       />
     );
@@ -143,14 +142,13 @@ function Bootstrap({
 
 function Login({
   version,
-  username,
   onComplete,
 }: {
   version: string;
-  username: string;
   onComplete: () => void;
 }) {
   const { t } = useTranslation();
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const login = useMutation({
     mutationFn: () =>
@@ -173,8 +171,8 @@ function Login({
           <Field
             label={t("auth.username")}
             value={username}
-            onChange={() => undefined}
-            disabled
+            onChange={setUsername}
+            autoComplete="username"
           />
           <Field
             label={t("auth.projectPassword")}

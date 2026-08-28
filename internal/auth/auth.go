@@ -52,11 +52,7 @@ func (s *Service) Status(ctx context.Context, request *http.Request) (Status, er
 	}
 	user, err := s.User(ctx, request)
 	if err != nil {
-		username, err := s.store.AdministratorUsername(ctx)
-		if err != nil {
-			return Status{}, err
-		}
-		return Status{Username: username}, nil
+		return Status{}, nil
 	}
 	return Status{Authenticated: true, Username: user.Username}, nil
 }

@@ -191,3 +191,30 @@ func TestWriteErrorIncludesCodeAndMessage(t *testing.T) {
 		t.Fatalf("error response = %s", body)
 	}
 }
+
+func TestUnauthenticatedStatusDoesNotExposeAdministratorUsername(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.CreateAdministrator(context.Background(), "bound-user", "password-hash"); err != nil {
+		t.Fatal(err)
+	}
+
+	disks := storage.New(database.IsManagedUUID)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, usb.New(disks), http.NotFoundHandler())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/auth/status", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var status map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := status["username"]; exists {
+		t.Fatalf("unauthenticated status exposed username: %s", response.Body.String())
+	}
+}
