@@ -1,67 +1,53 @@
 # SimpleFSManager
 
-Single-user Linux disk management UI for physical disks, GPT partition tables, ext4/xfs/btrfs/f2fs filesystems, and application-managed mounts at `/volN`.
+[English](README.en.md)
 
-## Current status
+SimpleFSManager 是一个面向单管理员的 Linux 磁盘管理 Web 界面，用于管理物理磁盘、分区和应用挂载的文件系统。执行磁盘操作需要 root 权限。
 
-- Go HTTP service using Huma with a chi adapter
-- SQLite state store using the pure-Go `modernc.org/sqlite` driver
-- React, Vite, Tailwind, shadcn-compatible frontend setup
-- Chinese and English UI through `react-i18next`, with browser detection and persisted language selection
-- OpenAPI endpoint at `/openapi.json` and generated TypeScript API types
-- Embedded production frontend
-- Live physical disk and partition discovery through `lsblk --json`, with `blkid` fallback for UUID and filesystem type
-- SMART health and temperature discovery through `smartctl --json`; unavailable SMART data is reported as unavailable
-- Complete SMART JSON is available on demand through `GET /api/disks/smart?diskPath=/dev/...`
-- Mounted filesystem capacity through `unix.Statfs`
-- GPT initialization and partition changes through `go-diskfs`, ext4/xfs/btrfs/f2fs formatting, mount/unmount, zoned-device discovery, and `BLKRRPART` partition-table rereads
+## 功能
 
-`GET /api/disks` reports the live topology. The WebUI exposes GPT initialization, partition creation/deletion, formatting, and mount/unmount with explicit target confirmation.
+- 发现物理磁盘、分区和文件系统信息
+- 初始化 GPT 分区表，创建和删除分区
+- 格式化 ext4、xfs、btrfs 和 f2fs 文件系统
+- 管理应用配置的内部卷挂载路径
+- 自动挂载支持的 USB 存储分区，并支持手动挂载和卸载
+- 查看 SMART 健康状态、温度和完整 SMART 数据
+- 支持分区区域磁盘（zoned disk）
+- 通过单管理员账户保护所有磁盘管理操作
 
-A disk is treated as the system disk when it contains a mounted partition whose UUID is not registered in this project's SQLite database. A whole-disk mount is also always treated as a system disk. System disks are never eligible for format or partition changes. This assumes, by design, that only the system disk is mounted through `/etc/fstab`.
+## 使用
 
-Formatted internal partitions must have an application-managed mount path configured before they can be mounted. Existing volumes keep their persisted `/volN` paths for compatibility; new volumes may use another clean absolute path. At startup and on udev events, only configured auto-mount volumes are restored; `/etc/fstab` is never modified or read.
+首次访问时，请使用符合条件的本机 Linux 用户完成 PAM 认证，并设置独立的 SimpleFSManager 项目密码。后续登录必须输入已绑定的用户名和项目密码。
 
-USB storage (`lsblk TRAN=usb`) uses a separate transient mount space. Attached devices receive insertion-order letters and supported ext4/xfs partitions are automatically mounted at `/usb<device-letter><partition-letter>`, for example `/usbaa` and `/usbab`. Removing a USB device releases its letter for the next device; USB storage only supports mount and unmount.
-
-Zoned devices are reported with their zone model and geometry. New partitions on zoned disks start and end on zone boundaries. Manually requested partition sizes must be an exact multiple of the zone size; requests to use the largest free region are rounded down to the largest complete zone range.
-
-Manually unmounting a USB partition suppresses its automatic mount for the current insertion cycle. Mounting it again or physically removing the device clears that suppression.
-
-## Development
-
-Requirements: Go 1.26+, Node.js 24+, npm, and the Linux tools required by the implemented storage features.
-
-`lsblk`, `blkid`, `smartctl`, and `mkfs.ext4` are required for their respective features. XFS formatting requires `mkfs.xfs`; btrfs and f2fs formatting require `mkfs.btrfs` and `mkfs.f2fs`. SMART data is optional at runtime: disks without SMART support or systems without `smartctl` remain visible without temperature and health data. The `go-udev` monitor is behind the `libudev` build tag because it needs CGO and libudev development headers:
+带标签的发布会在 GitHub Releases 中提供 `amd64` Debian 软件包。安装后服务会自动启用并启动：
 
 ```sh
-go build -tags libudev ./cmd/simplefsmanager
+sudo apt install ./simplefsmanager_*.deb
+systemctl status simplefsmanager
 ```
 
-The default build works without libudev but reports udev monitoring as unavailable.
+服务默认监听 `0.0.0.0:7376`。在通过支持 TLS 的反向代理公开服务前，请使用防火墙限制访问，或通过 systemd 覆盖配置指定 `-listen 127.0.0.1:7376`。
 
-## Authentication
+登录 Web 界面后，可以执行 GPT 初始化、分区创建或删除、文件系统格式化、内部卷挂载或卸载，以及 USB 存储挂载或卸载。
 
-On first access, an eligible local Linux user (`UID >= 1000`, non-root) authenticates through PAM and then creates a separate SimpleFSManager password. The project password is stored as an Argon2id hash in SQLite; the system password is not stored or changed. Later logins use only the project password.
+## 构建与开发
 
-Install PAM development headers before building and install the supplied PAM service file before first login:
+需要 Go 1.26+、Node.js 24+、npm，以及功能所需的 Linux 工具。`lsblk`、`blkid`、`smartctl` 和 `mkfs.ext4` 分别用于磁盘发现、文件系统信息、SMART 数据和 ext4 格式化。XFS、btrfs 和 f2fs 格式化还分别需要 `mkfs.xfs`、`mkfs.btrfs` 和 `mkfs.f2fs`。
+
+构建前请安装 PAM 开发头文件，并在首次登录前安装提供的 PAM 服务文件：
 
 ```sh
 sudo apt install libpam0g-dev
 sudo install -m 644 deploy/simplefsmanager.pam /etc/pam.d/simplefsmanager
 ```
 
-Sessions use HttpOnly, SameSite=Strict cookies. Restrict network access until TLS is configured.
-
-User-visible API errors are returned as stable error codes and translated by the frontend. Do not use raw system command, PAM, or database error text as a UI message.
-
-Run the API:
+运行 API：
 
 ```sh
 go run ./cmd/simplefsmanager -data-dir ./var
 ```
 
-In another terminal, run the frontend development server:
+在另一个终端运行前端开发服务器：
 
 ```sh
 cd web
@@ -69,40 +55,33 @@ npm install
 npm run dev
 ```
 
-Build the embedded frontend and service. The binary version comes from the
-nearest Git tag plus its commit distance; an untagged checkout uses its commit
-ID and a dirty checkout includes the `-dirty` suffix:
+构建嵌入式前端和服务：
 
 ```sh
 make build
 ```
 
-Override the detected value with `make build VERSION=v0.1.0` when needed.
+需要时可通过 `make build VERSION=v0.1.0` 覆盖自动检测的版本值。未安装 libudev 开发头文件时，默认构建仍可使用；如需 udev 监控，请使用：
 
-Run the test suite after building the embedded frontend:
+```sh
+go build -tags libudev ./cmd/simplefsmanager
+```
+
+构建嵌入式前端后运行测试：
 
 ```sh
 make test
 ```
 
-Regenerate frontend API types after changing Huma endpoints. The service must be running locally:
+修改 Huma 端点后，可在服务本机运行时重新生成前端 API 类型：
 
 ```sh
 cd web
 npm run api:generate
 ```
 
-## Deployment
+## 技术栈
 
-Tagged releases publish an `amd64` Debian package on GitHub Releases. Install it with:
-
-```sh
-sudo apt install ./simplefsmanager_*.deb
-systemctl status simplefsmanager
-```
-
-The package installs the service unit and PAM configuration, then enables and starts the service. Removing the package stops and disables the service, but preserves `/var/lib/simplefsmanager`.
-
-The example unit lives at `deploy/simplefsmanager.service`. The service defaults to listening on `0.0.0.0:7376`; restrict it with a firewall or add a systemd override with `-listen 127.0.0.1:7376` before exposing the UI through a TLS-enabled reverse proxy.
-
-The service needs root privileges for storage operations. It has a single-administrator login, but restrict network access until TLS is configured for network exposure.
+- 后端：Go、Huma、chi
+- 数据库：SQLite
+- 前端：React、Vite、Tailwind
