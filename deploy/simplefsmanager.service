@@ -1,6 +1,8 @@
 [Unit]
 Description=SimpleFSManager disk management service
-After=local-fs.target
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=local-fs.target
 
 [Service]
 Type=simple
