@@ -118,7 +118,7 @@ func (m *Manager) Recover(ctx context.Context) error {
 					break
 				}
 				if len(partition.Mountpoints) > 0 {
-					return fmt.Errorf("managed volume %s is mounted outside %s", volume.UUID, volume.MountPath)
+					continue
 				}
 				if err := m.storage.Mount(ctx, partition.Path, volume.MountPath, partition.FileSystem); err != nil {
 					return fmt.Errorf("restore %s: %w", volume.MountPath, err)

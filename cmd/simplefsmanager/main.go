@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -65,6 +66,7 @@ func main() {
 	usbVolumes := usb.New(disks)
 	if err := volumes.Recover(ctx); err != nil {
 		logger.Error("restore managed volumes", "error", err)
+		os.Exit(1)
 	} else {
 		logger.Info("managed volumes restored")
 	}
@@ -104,14 +106,23 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	listener, err := net.Listen("tcp", *address)
+	if err != nil {
+		logger.Error("listen HTTP", "address", *address, "error", err)
+		os.Exit(1)
+	}
 
 	go func() {
 		logger.Info("SimpleFSManager listening", "address", *address)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("serve HTTP", "error", err)
 			os.Exit(1)
 		}
 	}()
+	if err := notifySystemd("READY=1"); err != nil {
+		logger.Error("notify systemd that service is ready", "error", err)
+		os.Exit(1)
+	}
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

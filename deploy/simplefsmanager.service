@@ -2,10 +2,11 @@
 Description=SimpleFSManager disk management service
 DefaultDependencies=no
 After=systemd-udevd.service
-Before=local-fs.target
+Before=local-fs-pre.target local-fs.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=root
 Group=root
 ExecStart=/usr/bin/simplefsmanager
@@ -15,4 +16,4 @@ NoNewPrivileges=false
 MountFlags=shared
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=local-fs-pre.target
