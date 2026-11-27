@@ -23,6 +23,11 @@ import (
 	"github.com/sgpublic/simplefsmanager/internal/web"
 )
 
+const (
+	udevDebounceDelay      = 500 * time.Millisecond
+	sessionCleanupInterval = time.Hour
+)
+
 func main() {
 	var (
 		address     = flag.String("listen", "0.0.0.0:7376", "HTTP listen address")
@@ -61,12 +66,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if err := db.DeleteExpiredSessions(ctx, time.Now()); err != nil {
+		logger.Error("clean expired sessions", "error", err)
+	}
+
 	disks := storage.New(db.IsManagedUUID)
 	volumes := volume.New(db, disks)
 	usbVolumes := usb.New(disks)
 	if err := volumes.Recover(ctx); err != nil {
 		logger.Error("restore managed volumes", "error", err)
-		os.Exit(1)
 	} else {
 		logger.Info("managed volumes restored")
 	}
@@ -75,36 +83,66 @@ func main() {
 	} else {
 		logger.Info("USB volumes reconciled")
 	}
+
+	diskCache := storage.NewDiskCache(disks.List)
+	diskCache.Start(ctx)
+
+	reconciler := newTopologyReconciler(udevDebounceDelay, func(runCtx context.Context, addedDisks []string) {
+		if err := volumes.Recover(runCtx); err != nil {
+			logger.Error("restore managed volumes after udev event", "error", err)
+		} else {
+			logger.Info("managed volumes restored after udev event")
+		}
+		if len(addedDisks) == 0 {
+			if err := usbVolumes.Reconcile(runCtx, ""); err != nil {
+				logger.Error("mount USB volumes after udev event", "error", err)
+			} else {
+				logger.Info("USB volumes reconciled after udev event")
+			}
+			diskCache.TriggerRefresh()
+			return
+		}
+		for _, addedDiskPath := range addedDisks {
+			if err := usbVolumes.Reconcile(runCtx, addedDiskPath); err != nil {
+				logger.Error("mount USB volumes after udev event", "disk", addedDiskPath, "error", err)
+			} else {
+				logger.Info("USB volumes reconciled after udev event", "disk", addedDiskPath)
+			}
+		}
+		diskCache.TriggerRefresh()
+	})
+	defer reconciler.Stop()
+
 	go func() {
 		if err := storage.WatchUdev(ctx, func(event storage.UdevEvent) {
-			logger.Info("block device topology changed")
-			go func() {
-				time.Sleep(500 * time.Millisecond)
-				if err := volumes.Recover(ctx); err != nil {
-					logger.Error("restore managed volumes after udev event", "error", err)
-				} else {
-					logger.Info("managed volumes restored after udev event")
-				}
-				addedDiskPath := ""
-				if event.Action == "add" && event.Devtype == "disk" {
-					addedDiskPath = event.Devnode
-				}
-				if err := usbVolumes.Reconcile(ctx, addedDiskPath); err != nil {
-					logger.Error("mount USB volumes after udev event", "error", err)
-				} else {
-					logger.Info("USB volumes reconciled after udev event")
-				}
-			}()
+			logger.Info("block device topology changed", "action", event.Action, "devnode", event.Devnode, "devtype", event.Devtype)
+			reconciler.Notify(ctx, event)
 		}); err != nil && !errors.Is(err, storage.ErrUdevUnavailable) {
 			logger.Error("watch udev", "error", err)
 		}
 	}()
 
-	handler := api.New(db, logger, disks, usbVolumes, web.Handler())
+	go func() {
+		ticker := time.NewTicker(sessionCleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				if err := db.DeleteExpiredSessions(ctx, now); err != nil {
+					logger.Error("clean expired sessions", "error", err)
+				}
+			}
+		}
+	}()
+
+	handler := api.New(db, logger, disks, volumes, usbVolumes, web.Handler(), diskCache)
 	server := &http.Server{
 		Addr:              *address,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	listener, err := net.Listen("tcp", *address)
 	if err != nil {

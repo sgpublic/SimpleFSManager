@@ -14,10 +14,14 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite: %w", err)
 	}
+	// Serialize access through a single connection so concurrent writes never
+	// fail with SQLITE_BUSY under modernc.org/sqlite.
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping SQLite: %w", err)
@@ -49,6 +53,7 @@ func (s *Store) migrate() error {
 			expires_at TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
+		CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at);
 		CREATE TABLE IF NOT EXISTS volumes (
 			id INTEGER PRIMARY KEY,
 			uuid TEXT NOT NULL UNIQUE,

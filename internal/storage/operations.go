@@ -2,9 +2,9 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +14,7 @@ import (
 	"github.com/diskfs/go-diskfs"
 	diskpkg "github.com/diskfs/go-diskfs/disk"
 	"github.com/diskfs/go-diskfs/partition/gpt"
+	"github.com/sgpublic/simplefsmanager/internal/apperr"
 	"golang.org/x/sys/unix"
 )
 
@@ -24,11 +25,11 @@ var usbPath = regexp.MustCompile(`^/usb[a-z][a-z]$`)
 // excluding paths that are part of the operating system's live namespace.
 func ValidateMountPath(target string) error {
 	if target == "" || !filepath.IsAbs(target) || filepath.Clean(target) != target || target == "/" {
-		return fmt.Errorf("mount path must be a clean absolute path other than /")
+		return apperr.New(http.StatusBadRequest, apperr.CodeInvalidMountPath, "mount path must be a clean absolute path other than /")
 	}
 	for _, prefix := range []string{"/boot", "/dev", "/etc", "/proc", "/run", "/sys", "/usr"} {
 		if target == prefix || strings.HasPrefix(target, prefix+"/") {
-			return fmt.Errorf("mount path is reserved by the operating system")
+			return apperr.New(http.StatusBadRequest, apperr.CodeInvalidMountPath, "mount path is reserved by the operating system")
 		}
 	}
 	return nil
@@ -37,15 +38,18 @@ func ValidateMountPath(target string) error {
 // InitializeGPT replaces the target disk's partition table with an empty GPT.
 // The caller must obtain explicit user confirmation before calling this method.
 func (m *Manager) InitializeGPT(ctx context.Context, diskPath string) (bool, error) {
-	if err := m.ensureUnusedDisk(ctx, diskPath); err != nil {
-		return false, err
-	}
-	device, err := m.device(ctx, diskPath)
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
+	disk, device, err := m.diskWithRaw(ctx, diskPath)
 	if err != nil {
 		return false, err
 	}
+	if err := validateUnusedDisk(disk); err != nil {
+		return false, err
+	}
 	if isHostManaged(device) {
-		return false, fmt.Errorf("host-managed zoned disks must be formatted as a whole-disk F2FS volume")
+		return false, apperr.New(http.StatusBadRequest, apperr.CodeInvalidDisk, "host-managed zoned disks must be formatted as a whole-disk F2FS volume")
 	}
 	return m.initializeGPT(ctx, diskPath)
 }
@@ -53,36 +57,39 @@ func (m *Manager) InitializeGPT(ctx context.Context, diskPath string) (bool, err
 // Reclaim replaces an inactive RAID/LVM/crypt storage stack with an empty GPT.
 // The stack must not have any mounted filesystems.
 func (m *Manager) Reclaim(ctx context.Context, diskPath string) (bool, error) {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
 	device, err := m.device(ctx, diskPath)
 	if err != nil {
 		return false, err
 	}
 	if strings.EqualFold(strings.TrimSpace(device.Transport), "usb") {
-		return false, fmt.Errorf("USB storage only supports mount and unmount")
+		return false, apperr.New(http.StatusBadRequest, apperr.CodeUSBMutationNotSupported, "USB storage only supports mount and unmount")
 	}
 	if len(mountpoints(device.Mountpoints)) > 0 || hasMountedDescendant(device) {
-		return false, fmt.Errorf("refusing to reclaim mounted disk %s", diskPath)
+		return false, apperr.New(http.StatusConflict, apperr.CodeMountedDiskProtected, fmt.Sprintf("refusing to reclaim mounted disk %s", diskPath))
 	}
 	if !hasStorageStack(device) {
-		return false, fmt.Errorf("disk %s does not contain a reclaimable storage stack", diskPath)
+		return false, apperr.New(http.StatusBadRequest, apperr.CodeReclaimNotAvailable, fmt.Sprintf("disk %s does not contain a reclaimable storage stack", diskPath))
 	}
 	if isHostManaged(device) {
-		return false, fmt.Errorf("host-managed zoned disks must be formatted as a whole-disk F2FS volume")
+		return false, apperr.New(http.StatusBadRequest, apperr.CodeInvalidDisk, "host-managed zoned disks must be formatted as a whole-disk F2FS volume")
 	}
 
 	for _, child := range postorder(device) {
 		switch {
 		case child.Type == "lvm":
 			if _, err := m.runner.Run(ctx, "dmsetup", "remove", "--retry", child.Path); err != nil {
-				return false, fmt.Errorf("deactivate logical volume %s: %w", child.Path, err)
+				return false, apperr.Wrap(http.StatusInternalServerError, apperr.CodeReclaimToolFailed, fmt.Sprintf("deactivate logical volume %s: %v", child.Path, err), err)
 			}
 		case child.Type == "crypt":
 			if _, err := m.runner.Run(ctx, "cryptsetup", "close", filepath.Base(child.Path)); err != nil {
-				return false, fmt.Errorf("close encrypted volume %s: %w", child.Path, err)
+				return false, apperr.Wrap(http.StatusInternalServerError, apperr.CodeReclaimToolFailed, fmt.Sprintf("close encrypted volume %s: %v", child.Path, err), err)
 			}
 		case strings.HasPrefix(child.Type, "raid"):
 			if _, err := m.runner.Run(ctx, "mdadm", "--stop", child.Path); err != nil {
-				return false, fmt.Errorf("stop RAID device %s: %w", child.Path, err)
+				return false, apperr.Wrap(http.StatusInternalServerError, apperr.CodeReclaimToolFailed, fmt.Sprintf("stop RAID device %s: %v", child.Path, err), err)
 			}
 		}
 	}
@@ -93,15 +100,15 @@ func (m *Manager) Reclaim(ctx context.Context, diskPath string) (bool, error) {
 		}
 		if hasRAIDDescendant(child) {
 			if _, err := m.runner.Run(ctx, "mdadm", "--zero-superblock", "--force", child.Path); err != nil {
-				return false, fmt.Errorf("clear RAID signature from %s: %w", child.Path, err)
+				return false, apperr.Wrap(http.StatusInternalServerError, apperr.CodeReclaimToolFailed, fmt.Sprintf("clear RAID signature from %s: %v", child.Path, err), err)
 			}
 		}
 		if _, err := m.runner.Run(ctx, "wipefs", "--all", "--force", child.Path); err != nil {
-			return false, fmt.Errorf("clear signatures from %s: %w", child.Path, err)
+			return false, apperr.Wrap(http.StatusInternalServerError, apperr.CodeReclaimToolFailed, fmt.Sprintf("clear signatures from %s: %v", child.Path, err), err)
 		}
 	}
 	if _, err := m.runner.Run(ctx, "wipefs", "--all", "--force", diskPath); err != nil {
-		return false, fmt.Errorf("clear signatures from %s: %w", diskPath, err)
+		return false, apperr.Wrap(http.StatusInternalServerError, apperr.CodeReclaimToolFailed, fmt.Sprintf("clear signatures from %s: %v", diskPath, err), err)
 	}
 	return m.initializeGPT(ctx, diskPath)
 }
@@ -112,49 +119,54 @@ func (m *Manager) Reclaim(ctx context.Context, diskPath string) (bool, error) {
 // true, it fills the largest contiguous range of complete zones.
 func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeBytes uint64, useLargestFree bool, name string) (int, error) {
 	if sizeBytes == 0 && !useLargestFree {
-		return 0, fmt.Errorf("partition size must be greater than zero")
+		return 0, apperr.New(http.StatusBadRequest, apperr.CodeInsufficientSpace, "partition size must be greater than zero")
 	}
-	if err := m.ensureUnusedDisk(ctx, diskPath); err != nil {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
+	diskInfo, device, err := m.diskWithRaw(ctx, diskPath)
+	if err != nil {
 		return 0, err
 	}
+	if err := validateUnusedDisk(diskInfo); err != nil {
+		return 0, err
+	}
+	if isHostManaged(device) {
+		return 0, apperr.New(http.StatusBadRequest, apperr.CodeInvalidPartitionTable, "host-managed zoned disks do not support partitions; format the whole disk as F2FS")
+	}
+
 	disk, err := diskfs.Open(diskPath)
 	if err != nil {
 		return 0, fmt.Errorf("open disk for partition creation: %w", err)
 	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = disk.Close()
+		}
+	}()
+
 	table, err := gptTable(disk)
 	if err != nil {
-		disk.Close()
 		return 0, err
 	}
 
-	device, err := m.device(ctx, diskPath)
-	if err != nil {
-		disk.Close()
-		return 0, err
-	}
-	if isHostManaged(device) {
-		disk.Close()
-		return 0, fmt.Errorf("host-managed zoned disks do not support partitions; format the whole disk as F2FS")
-	}
 	alignment := partitionAlignment(device, uint64(disk.LogicalBlocksize))
 	var start, end uint64
 	if useLargestFree {
 		var ok bool
 		start, end, ok = largestPartitionGapAligned(table, alignment, isZoned(device))
 		if !ok {
-			disk.Close()
-			return 0, fmt.Errorf("not enough unallocated space")
+			return 0, apperr.New(http.StatusBadRequest, apperr.CodeInsufficientSpace, "not enough unallocated space")
 		}
 	} else {
 		sectorSize := uint64(disk.LogicalBlocksize)
 		if isZoned(device) && sizeBytes%(device.ZoneSize) != 0 {
-			disk.Close()
-			return 0, fmt.Errorf("zoned partition size must be a multiple of %d bytes", device.ZoneSize)
+			return 0, apperr.New(http.StatusBadRequest, apperr.CodeInvalidZonedPartSize, fmt.Sprintf("zoned partition size must be a multiple of %d bytes", device.ZoneSize))
 		}
 		needed := (sizeBytes + sectorSize - 1) / sectorSize
 		if needed == 0 {
-			disk.Close()
-			return 0, fmt.Errorf("partition size must be greater than zero")
+			return 0, apperr.New(http.StatusBadRequest, apperr.CodeInsufficientSpace, "partition size must be greater than zero")
 		}
 		if isZoned(device) {
 			needed = alignSector(needed, alignment)
@@ -162,8 +174,7 @@ func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeByte
 		var ok bool
 		start, ok = nextPartitionStart(table, needed, alignment)
 		if !ok {
-			disk.Close()
-			return 0, fmt.Errorf("not enough unallocated space for %d bytes", sizeBytes)
+			return 0, apperr.New(http.StatusBadRequest, apperr.CodeInsufficientSpace, fmt.Sprintf("not enough unallocated space for %d bytes", sizeBytes))
 		}
 		end = start + needed - 1
 	}
@@ -176,9 +187,9 @@ func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeByte
 		Name:  name,
 	})
 	if err := disk.Partition(table); err != nil {
-		disk.Close()
 		return 0, fmt.Errorf("write GPT partition: %w", err)
 	}
+	closed = true
 	if err := disk.Close(); err != nil {
 		return 0, fmt.Errorf("close partitioned disk: %w", err)
 	}
@@ -191,25 +202,35 @@ func (m *Manager) CreatePartition(ctx context.Context, diskPath string, sizeByte
 // DeletePartition removes a GPT partition by its partition-table index.
 func (m *Manager) DeletePartition(ctx context.Context, diskPath string, index int) error {
 	if index < 1 {
-		return fmt.Errorf("partition index must be positive")
+		return apperr.New(http.StatusBadRequest, apperr.CodeInvalidPartition, "partition index must be positive")
 	}
-	if err := m.ensureUnusedDisk(ctx, diskPath); err != nil {
-		return err
-	}
-	device, err := m.device(ctx, diskPath)
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
+	diskInfo, device, err := m.diskWithRaw(ctx, diskPath)
 	if err != nil {
 		return err
 	}
-	if isHostManaged(device) {
-		return fmt.Errorf("host-managed zoned disks do not support partitions")
+	if err := validateUnusedDisk(diskInfo); err != nil {
+		return err
 	}
+	if isHostManaged(device) {
+		return apperr.New(http.StatusBadRequest, apperr.CodeInvalidPartitionTable, "host-managed zoned disks do not support partitions")
+	}
+
 	disk, err := diskfs.Open(diskPath)
 	if err != nil {
 		return fmt.Errorf("open disk for partition deletion: %w", err)
 	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = disk.Close()
+		}
+	}()
+
 	table, err := gptTable(disk)
 	if err != nil {
-		disk.Close()
 		return err
 	}
 	partitions := make([]*gpt.Partition, 0, len(table.Partitions))
@@ -222,14 +243,13 @@ func (m *Manager) DeletePartition(ctx context.Context, diskPath string, index in
 		partitions = append(partitions, partition)
 	}
 	if !found {
-		disk.Close()
-		return fmt.Errorf("GPT partition %d does not exist", index)
+		return apperr.New(http.StatusNotFound, apperr.CodePartitionNotFound, fmt.Sprintf("GPT partition %d does not exist", index))
 	}
 	table.Partitions = partitions
 	if err := disk.Partition(table); err != nil {
-		disk.Close()
 		return fmt.Errorf("write GPT partition deletion: %w", err)
 	}
+	closed = true
 	if err := disk.Close(); err != nil {
 		return fmt.Errorf("close partitioned disk: %w", err)
 	}
@@ -237,15 +257,18 @@ func (m *Manager) DeletePartition(ctx context.Context, diskPath string, index in
 }
 
 func (m *Manager) Format(ctx context.Context, partitionPath, filesystem string) error {
-	if err := m.ensureUnusedPartition(ctx, partitionPath, false); err != nil {
-		return err
-	}
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
 	disk, partition, err := m.Partition(ctx, partitionPath)
 	if err != nil {
 		return err
 	}
+	if err := validateUnusedPartition(disk, partition, false); err != nil {
+		return err
+	}
 	if disk.Path == partition.Path && isHostManaged(lsblkDevice{Zoned: disk.Zoned, ZoneSize: disk.ZoneSizeBytes}) {
-		return fmt.Errorf("host-managed zoned disks must be formatted through the whole-disk F2FS operation")
+		return apperr.New(http.StatusBadRequest, apperr.CodeInvalidDisk, "host-managed zoned disks must be formatted through the whole-disk F2FS operation")
 	}
 	var command string
 	var args []string
@@ -259,7 +282,7 @@ func (m *Manager) Format(ctx context.Context, partitionPath, filesystem string) 
 	case "f2fs":
 		command, args = "mkfs.f2fs", []string{"-f", partitionPath}
 	default:
-		return fmt.Errorf("unsupported filesystem %q", filesystem)
+		return apperr.New(http.StatusBadRequest, apperr.CodeUnsupportedFilesystem, fmt.Sprintf("unsupported filesystem %q", filesystem))
 	}
 	if _, err := m.runner.Run(ctx, command, args...); err != nil {
 		return fmt.Errorf("format %s as %s: %w", partitionPath, filesystem, err)
@@ -269,15 +292,18 @@ func (m *Manager) Format(ctx context.Context, partitionPath, filesystem string) 
 
 // FormatWholeDisk formats a host-managed zoned disk as one F2FS volume.
 func (m *Manager) FormatWholeDisk(ctx context.Context, diskPath string) error {
-	if err := m.ensureUnusedDisk(ctx, diskPath); err != nil {
-		return err
-	}
-	device, err := m.device(ctx, diskPath)
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
+	disk, device, err := m.diskWithRaw(ctx, diskPath)
 	if err != nil {
 		return err
 	}
+	if err := validateUnusedDisk(disk); err != nil {
+		return err
+	}
 	if !isHostManaged(device) {
-		return fmt.Errorf("whole-disk formatting is only supported for host-managed zoned disks")
+		return apperr.New(http.StatusBadRequest, apperr.CodeInvalidDisk, "whole-disk formatting is only supported for host-managed zoned disks")
 	}
 	if _, err := m.runner.Run(ctx, "mkfs.f2fs", "-f", "-m", diskPath); err != nil {
 		return fmt.Errorf("format host-managed disk %s as f2fs: %w", diskPath, err)
@@ -287,18 +313,25 @@ func (m *Manager) FormatWholeDisk(ctx context.Context, diskPath string) error {
 
 func (m *Manager) Mount(ctx context.Context, partitionPath, target, filesystem string) error {
 	if !managedFilesystem(filesystem) {
-		return fmt.Errorf("unsupported filesystem %q", filesystem)
+		return apperr.New(http.StatusBadRequest, apperr.CodeUnsupportedFilesystem, fmt.Sprintf("unsupported filesystem %q", filesystem))
 	}
-	if usbPath.MatchString(target) {
-		// USB targets are assigned by the USB manager.
-	} else if err := ValidateMountPath(target); err != nil {
-		return fmt.Errorf("invalid mount path: %w", err)
+	if !usbPath.MatchString(target) {
+		if err := ValidateMountPath(target); err != nil {
+			return err
+		}
 	}
-	if err := m.ensureUnusedPartition(ctx, partitionPath, true); err != nil {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
+	disk, partition, err := m.Partition(ctx, partitionPath)
+	if err != nil {
+		return err
+	}
+	if err := validateUnusedPartition(disk, partition, true); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Clean(target), 0o755); err != nil {
-		return fmt.Errorf("create mount target: %w", err)
+		return apperr.Wrap(http.StatusBadRequest, apperr.CodeInvalidMountTarget, fmt.Sprintf("create mount target: %v", err), err)
 	}
 	if err := unix.Mount(partitionPath, target, filesystem, unix.MS_NODEV|unix.MS_NOSUID, ""); err != nil {
 		return fmt.Errorf("mount %s at %s: %w", partitionPath, target, err)
@@ -309,9 +342,12 @@ func (m *Manager) Mount(ctx context.Context, partitionPath, target, filesystem s
 func (m *Manager) Unmount(target string) error {
 	if !usbPath.MatchString(target) {
 		if err := ValidateMountPath(target); err != nil {
-			return fmt.Errorf("invalid mount path: %w", err)
+			return err
 		}
 	}
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
 	if err := unix.Unmount(target, 0); err != nil {
 		return fmt.Errorf("unmount %s: %w", target, err)
 	}
@@ -331,20 +367,16 @@ func rereadPartitionTable(diskPath string) error {
 }
 
 func (m *Manager) device(ctx context.Context, diskPath string) (lsblkDevice, error) {
-	output, err := m.runner.Run(ctx, "lsblk", "--json", "--bytes", "--zoned", "--output", "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,PTTYPE,FSTYPE,UUID,MOUNTPOINTS,ZONED,ZONE-SZ,ZONE-WGRAN")
+	rawDevices, err := m.listRawDevices(ctx)
 	if err != nil {
-		return lsblkDevice{}, fmt.Errorf("list block devices: %w", err)
+		return lsblkDevice{}, err
 	}
-	var result lsblkOutput
-	if err := json.Unmarshal(output, &result); err != nil {
-		return lsblkDevice{}, fmt.Errorf("decode lsblk output: %w", err)
-	}
-	for _, device := range result.BlockDevices {
+	for _, device := range rawDevices {
 		if device.Type == "disk" && device.Path == diskPath {
 			return device, nil
 		}
 	}
-	return lsblkDevice{}, fmt.Errorf("%s is not a physical disk", diskPath)
+	return lsblkDevice{}, apperr.New(http.StatusBadRequest, apperr.CodeInvalidDisk, fmt.Sprintf("%s is not a physical disk", diskPath))
 }
 
 func postorder(device lsblkDevice) []lsblkDevice {
@@ -367,28 +399,35 @@ func hasRAIDDescendant(device lsblkDevice) bool {
 
 func (m *Manager) Reboot(ctx context.Context) error {
 	if _, err := m.runner.Run(ctx, "systemctl", "reboot"); err != nil {
-		return fmt.Errorf("restart system: %w", err)
+		return apperr.Wrap(http.StatusInternalServerError, apperr.CodeRebootFailed, fmt.Sprintf("restart system: %v", err), err)
 	}
 	return nil
 }
 
-func (m *Manager) initializeGPT(ctx context.Context, diskPath string) (bool, error) {
+func (m *Manager) initializeGPT(_ context.Context, diskPath string) (bool, error) {
 	disk, err := diskfs.Open(diskPath)
 	if err != nil {
 		return false, fmt.Errorf("open disk for GPT initialization: %w", err)
 	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = disk.Close()
+		}
+	}()
+
 	table := &gpt.Table{
 		LogicalSectorSize:  int(disk.LogicalBlocksize),
 		PhysicalSectorSize: int(disk.PhysicalBlocksize),
 		ProtectiveMBR:      true,
 	}
 	if err := disk.Partition(table); err != nil {
-		disk.Close()
 		if requiresReboot(err) {
 			return true, nil
 		}
 		return false, fmt.Errorf("write GPT: %w", err)
 	}
+	closed = true
 	if err := disk.Close(); err != nil {
 		return false, fmt.Errorf("close GPT device: %w", err)
 	}
@@ -412,7 +451,7 @@ func gptTable(device *diskpkg.Disk) (*gpt.Table, error) {
 	}
 	gptTable, ok := table.(*gpt.Table)
 	if !ok {
-		return nil, fmt.Errorf("disk does not have a GPT partition table")
+		return nil, apperr.New(http.StatusBadRequest, apperr.CodeInvalidPartitionTable, "disk does not have a GPT partition table")
 	}
 	return gptTable, nil
 }
@@ -522,45 +561,28 @@ func nextPartitionIndex(table *gpt.Table) int {
 	}
 }
 
-func (m *Manager) ensureUnusedDisk(ctx context.Context, diskPath string) error {
-	disks, err := m.List(ctx)
-	if err != nil {
-		return err
+func validateUnusedDisk(disk Disk) error {
+	if disk.USB {
+		return apperr.New(http.StatusBadRequest, apperr.CodeUSBMutationNotSupported, "USB storage only supports mount and unmount")
 	}
-	for _, disk := range disks {
-		if disk.Path == diskPath {
-			if disk.USB {
-				return fmt.Errorf("USB storage only supports mount and unmount")
-			}
-			if disk.Protected {
-				return fmt.Errorf("refusing to modify mounted disk %s", diskPath)
-			}
-			return nil
-		}
+	if disk.System {
+		return apperr.New(http.StatusConflict, apperr.CodeSystemDiskProtected, fmt.Sprintf("refusing to modify system disk %s", disk.Path))
 	}
-	return fmt.Errorf("%s is not a physical disk", diskPath)
+	if disk.Protected {
+		return apperr.New(http.StatusConflict, apperr.CodeMountedDiskProtected, fmt.Sprintf("refusing to modify mounted disk %s", disk.Path))
+	}
+	return nil
 }
 
-func (m *Manager) ensureUnusedPartition(ctx context.Context, partitionPath string, allowUSB bool) error {
-	disks, err := m.List(ctx)
-	if err != nil {
-		return err
+func validateUnusedPartition(disk Disk, partition Partition, allowUSB bool) error {
+	if disk.USB && !allowUSB {
+		return apperr.New(http.StatusBadRequest, apperr.CodeUSBMutationNotSupported, "USB storage only supports mount and unmount")
 	}
-	for _, disk := range disks {
-		for _, partition := range disk.Partitions {
-			if partition.Path == partitionPath {
-				if disk.USB && !allowUSB {
-					return fmt.Errorf("USB storage only supports mount and unmount")
-				}
-				if disk.System {
-					return fmt.Errorf("refusing to modify system disk %s", disk.Path)
-				}
-				if len(partition.Mountpoints) > 0 {
-					return fmt.Errorf("refusing to modify mounted partition %s", partitionPath)
-				}
-				return nil
-			}
-		}
+	if disk.System {
+		return apperr.New(http.StatusConflict, apperr.CodeSystemDiskProtected, fmt.Sprintf("refusing to modify system disk %s", disk.Path))
 	}
-	return fmt.Errorf("%s is not a physical disk partition", partitionPath)
+	if len(partition.Mountpoints) > 0 {
+		return apperr.New(http.StatusConflict, apperr.CodeMountedDiskProtected, fmt.Sprintf("refusing to modify mounted partition %s", partition.Path))
+	}
+	return nil
 }

@@ -106,10 +106,12 @@ type recordingRunner struct {
 	name        string
 	args        []string
 	lsblkOutput []byte
+	lsblkCalls  int
 }
 
 func (r *recordingRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	if name == "lsblk" {
+		r.lsblkCalls++
 		if r.lsblkOutput != nil {
 			return r.lsblkOutput, nil
 		}
@@ -133,6 +135,9 @@ func TestFormatSupportsBtrfsAndF2FS(t *testing.T) {
 		manager := &Manager{runner: runner}
 		if err := manager.Format(context.Background(), "/dev/sdb1", test.filesystem); err != nil {
 			t.Fatal(err)
+		}
+		if runner.lsblkCalls != 1 {
+			t.Fatalf("format %s called lsblk %d times, want 1", test.filesystem, runner.lsblkCalls)
 		}
 		if runner.name != test.command || len(runner.args) != len(test.args) {
 			t.Fatalf("format %s = %s %q, want %s %q", test.filesystem, runner.name, runner.args, test.command, test.args)

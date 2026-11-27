@@ -20,7 +20,7 @@ type fakeStorage struct {
 	listCalls        int
 }
 
-func (s *fakeStorage) List(context.Context) ([]storage.Disk, error) {
+func (s *fakeStorage) ListTopology(context.Context) ([]storage.Disk, error) {
 	s.mu.Lock()
 	s.listCalls++
 	call := s.listCalls

@@ -15,10 +15,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/sgpublic/simplefsmanager/internal/apperr"
 	"github.com/sgpublic/simplefsmanager/internal/auth"
 	"github.com/sgpublic/simplefsmanager/internal/storage"
 	"github.com/sgpublic/simplefsmanager/internal/store"
 	"github.com/sgpublic/simplefsmanager/internal/usb"
+	"github.com/sgpublic/simplefsmanager/internal/volume"
 )
 
 func TestLogOperationErrorIncludesOperationContext(t *testing.T) {
@@ -52,10 +55,10 @@ func TestMergeManagedVolumesAddsMissingRegisteredPartition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	disks, err := mergeManagedVolumes(context.Background(), []storage.Disk{{Partitions: []storage.Partition{{Path: "/dev/sdb1", UUID: present.UUID}}}}, []store.Volume{missing, present}, database)
-	if err != nil {
-		t.Fatal(err)
-	}
+	disks := mergeManagedVolumes(
+		[]storage.Disk{{Partitions: []storage.Partition{{Path: "/dev/sdb1", UUID: present.UUID}}}},
+		[]store.Volume{missing, present},
+	)
 	if len(disks) != 2 || !disks[0].Partitions[0].Registered || disks[0].Partitions[0].Missing {
 		t.Fatalf("present partition = %#v", disks)
 	}
@@ -68,15 +71,21 @@ func TestMergeManagedVolumesAddsMissingRegisteredPartition(t *testing.T) {
 	}
 }
 
-func TestOperationErrorLogsOnlyInternalErrors(t *testing.T) {
+func TestOperationErrorLogsOnlyInternalErrorsAndMapsStatus(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&output, nil))
 
-	operationError(logger, "format partition", errors.New("mkfs.ext4 failed"), "partition", "/dev/sdb1")
-	operationError(logger, "format partition", errors.New("refusing to modify mounted partition /dev/sdb1"), "partition", "/dev/sdb1")
+	internalErr := operationError(logger, "format partition", errors.New("mkfs.ext4 failed"), "partition", "/dev/sdb1")
+	clientErr := operationError(logger, "format partition", apperr.New(http.StatusConflict, apperr.CodeMountedDiskProtected, "refusing to modify mounted partition /dev/sdb1"), "partition", "/dev/sdb1")
 
 	if logs := strings.Count(output.String(), "operation failed"); logs != 1 {
 		t.Fatalf("got %d storage failure logs, want 1: %s", logs, output.String())
+	}
+	if statusErr, ok := internalErr.(huma.StatusError); !ok || statusErr.GetStatus() != http.StatusInternalServerError {
+		t.Fatalf("internalErr status = %#v, want 500", internalErr)
+	}
+	if statusErr, ok := clientErr.(huma.StatusError); !ok || statusErr.GetStatus() != http.StatusConflict {
+		t.Fatalf("clientErr status = %#v, want 409", clientErr)
 	}
 }
 
@@ -117,7 +126,8 @@ func TestMountPathOpenAPIAllowsUUIDWithoutPartitionPath(t *testing.T) {
 	defer database.Close()
 
 	disks := storage.New(database.IsManagedUUID)
-	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, usb.New(disks), http.NotFoundHandler())
+	volumes := volume.New(database, disks)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, volumes, usb.New(disks), http.NotFoundHandler())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
 	if response.Code != http.StatusOK {
@@ -165,7 +175,8 @@ func TestSmartDetailsRouteRequiresDiskPath(t *testing.T) {
 	}
 
 	disks := storage.New(database.IsManagedUUID)
-	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, usb.New(disks), http.NotFoundHandler())
+	volumes := volume.New(database, disks)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, volumes, usb.New(disks), http.NotFoundHandler())
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/disks/smart", nil)
 	request.AddCookie(auth.SessionCookie(token))
@@ -187,7 +198,8 @@ func TestSmartDetailsRouteRequiresAuthentication(t *testing.T) {
 	defer database.Close()
 
 	disks := storage.New(database.IsManagedUUID)
-	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, usb.New(disks), http.NotFoundHandler())
+	volumes := volume.New(database, disks)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, volumes, usb.New(disks), http.NotFoundHandler())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/disks/smart", nil))
 
@@ -196,11 +208,11 @@ func TestSmartDetailsRouteRequiresAuthentication(t *testing.T) {
 	}
 }
 
-func TestRecovererLogsPanic(t *testing.T) {
+func TestRecovererLogsPanicWithoutLeakingDetails(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&output, nil))
 	handler := recoverer(logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		panic("unexpected failure")
+		panic("secret internal pointer")
 	}))
 
 	response := httptest.NewRecorder()
@@ -209,7 +221,10 @@ func TestRecovererLogsPanic(t *testing.T) {
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("got status %d, want %d", response.Code, http.StatusInternalServerError)
 	}
-	for _, want := range []string{"panic while serving request", "method=POST", "path=/api/partitions/format", "panic=\"unexpected failure\"", "stack="} {
+	if strings.Contains(response.Body.String(), "secret internal pointer") {
+		t.Fatalf("recoverer leaked panic details to client: %s", response.Body.String())
+	}
+	for _, want := range []string{"panic while serving request", "method=POST", "path=/api/partitions/format", "panic=\"secret internal pointer\"", "stack="} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("log %q does not contain %q", output.String(), want)
 		}
@@ -236,7 +251,8 @@ func TestUnauthenticatedStatusDoesNotExposeAdministratorUsername(t *testing.T) {
 	}
 
 	disks := storage.New(database.IsManagedUUID)
-	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, usb.New(disks), http.NotFoundHandler())
+	volumes := volume.New(database, disks)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, volumes, usb.New(disks), http.NotFoundHandler())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/auth/status", nil))
 
@@ -249,5 +265,152 @@ func TestUnauthenticatedStatusDoesNotExposeAdministratorUsername(t *testing.T) {
 	}
 	if _, exists := status["username"]; exists {
 		t.Fatalf("unauthenticated status exposed username: %s", response.Body.String())
+	}
+}
+
+func TestLoginRateLimiting(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.CreateAdministrator(context.Background(), "admin", "invalid-hash"); err != nil {
+		t.Fatal(err)
+	}
+
+	disks := storage.New(database.IsManagedUUID)
+	volumes := volume.New(database, disks)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, volumes, usb.New(disks), http.NotFoundHandler())
+
+	for attempt := 0; attempt < authRateLimitMax; attempt++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"admin","password":"wrong"}`))
+		req.RemoteAddr = "192.0.2.10:12345"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want 401", attempt, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"admin","password":"wrong"}`))
+	req.RemoteAddr = "192.0.2.10:12345"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate-limited status = %d, want 429: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), apperr.CodeAuthRateLimited) {
+		t.Fatalf("rate-limited body = %s, want code %s", rec.Body.String(), apperr.CodeAuthRateLimited)
+	}
+}
+
+func TestVolumeAutoMountRouteUpdatesSettingIndependently(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	user, err := database.CreateAdministrator(ctx, "test-user", "password-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "test-session"
+	tokenSum := sha256.Sum256([]byte(token))
+	if err := database.CreateSession(ctx, base64.RawURLEncoding.EncodeToString(tokenSum[:]), user.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ConfigureVolume(ctx, "vol-1", "serial-1", 1, "/mnt/vol1", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	disks := storage.New(database.IsManagedUUID)
+	volumes := volume.New(database, disks)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, volumes, usb.New(disks), http.NotFoundHandler())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/volumes/auto-mount", strings.NewReader(`{"uuid":"vol-1","autoMount":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(auth.SessionCookie(token))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auto-mount enable status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	vol, err := database.VolumeByUUID(ctx, "vol-1")
+	if err != nil || !vol.AutoMount {
+		t.Fatalf("volume after enable = %#v, %v; want AutoMount=true", vol, err)
+	}
+
+	merged := mergeManagedVolumes(nil, []store.Volume{vol})
+	if len(merged) != 1 || !merged[0].Partitions[0].AutoMount {
+		t.Fatalf("merged missing volume AutoMount = %#v, want true", merged)
+	}
+}
+
+func TestDisksRouteUsesCacheAndSupportsForceRefresh(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	user, err := database.CreateAdministrator(ctx, "test-user", "password-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "test-session"
+	tokenSum := sha256.Sum256([]byte(token))
+	if err := database.CreateSession(ctx, base64.RawURLEncoding.EncodeToString(tokenSum[:]), user.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	diskCache := storage.NewDiskCache(func(context.Context) ([]storage.Disk, error) {
+		calls++
+		return []storage.Disk{{
+			Path:        "/dev/sdb",
+			Name:        "sdb",
+			SizeBytes:   uint64(calls) * 1000,
+			Mountpoints: []string{},
+			Partitions:  []storage.Partition{},
+		}}, nil
+	})
+	disks := storage.New(database.IsManagedUUID)
+	volumes := volume.New(database, disks)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, volumes, usb.New(disks), http.NotFoundHandler(), diskCache)
+
+	getDisks := func(url string) (uint64, string) {
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req.AddCookie(auth.SessionCookie(token))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d: %s", url, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Disks     []storage.Disk `json:"disks"`
+			UpdatedAt string         `json:"updatedAt"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Disks) != 1 || body.UpdatedAt == "" {
+			t.Fatalf("GET %s body = %#v", url, body)
+		}
+		return body.Disks[0].SizeBytes, body.UpdatedAt
+	}
+
+	size1, _ := getDisks("/api/disks")
+	size2, _ := getDisks("/api/disks")
+	if size1 != 1000 || size2 != 1000 || calls != 1 {
+		t.Fatalf("cached GETs = (%d, %d), calls = %d; want (1000, 1000), 1", size1, size2, calls)
+	}
+
+	size3, _ := getDisks("/api/disks?refresh=true")
+	if size3 != 2000 || calls != 2 {
+		t.Fatalf("forced GET = %d, calls = %d; want 2000, 2", size3, calls)
 	}
 }

@@ -2,13 +2,21 @@ package main
 
 import (
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestNotifySystemd(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "notify.sock")
+	// Use a short /tmp path so the Unix domain socket stays well under Linux's
+	// 108-byte sun_path limit even when TMPDIR is deeply nested.
+	dir, err := os.MkdirTemp("/tmp", "sfm-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "n.sock")
 	listener, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: socket, Net: "unixgram"})
 	if err != nil {
 		t.Fatal(err)

@@ -1,60 +1,62 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LockKeyhole } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { ErrorText } from "./components/ErrorText";
+import { LanguageSelect } from "./components/LanguageSelect";
 import { Dashboard } from "./dashboard";
-
-type AuthStatus = {
-  setupRequired: boolean;
-  authenticated: boolean;
-  username?: string;
-};
-type BuildInfo = { version: string };
-
-class ApiError extends Error {
-  constructor(
-    public code: string,
-    public params: Record<string, unknown> = {},
-    public message = code,
-  ) {
-    super(message);
-  }
-}
+import {
+  requestJSON,
+  setUnauthorizedHandler,
+  type AuthStatus,
+  type BuildInfo,
+} from "./lib/api";
 
 export function App() {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      queryClient.removeQueries({ queryKey: ["disks"] });
+      queryClient.removeQueries({ queryKey: ["smart"] });
+      void queryClient.invalidateQueries({ queryKey: ["auth-status"] });
+    });
+    return () => setUnauthorizedHandler(null);
+  }, [queryClient]);
+
   const status = useQuery({
     queryKey: ["auth-status"],
-    queryFn: () => request<AuthStatus>("/api/auth/status"),
+    queryFn: () => requestJSON<AuthStatus>("/api/auth/status"),
   });
   const buildInfo = useQuery({
     queryKey: ["build-info"],
-    queryFn: () => request<BuildInfo>("/api/build-info"),
+    queryFn: () => requestJSON<BuildInfo>("/api/build-info"),
   });
   const version = buildInfo.data?.version ?? "dev";
-  if (status.isLoading)
+
+  if (status.isLoading) {
     return (
       <AuthShell version={version}>
         <p className="text-sm text-slate-400">{t("auth.checking")}</p>
       </AuthShell>
     );
-  if (status.isError)
+  }
+  if (status.isError) {
     return (
       <AuthShell version={version}>
         <p className="text-sm text-rose-300">{t("auth.unavailable")}</p>
       </AuthShell>
     );
-  if (status.data?.setupRequired)
+  }
+  if (status.data?.setupRequired) {
     return (
       <Bootstrap version={version} onComplete={() => void status.refetch()} />
     );
-  if (!status.data?.authenticated)
-    return (
-      <Login
-        version={version}
-        onComplete={() => void status.refetch()}
-      />
-    );
+  }
+  if (!status.data?.authenticated) {
+    return <Login version={version} onComplete={() => void status.refetch()} />;
+  }
   return (
     <Dashboard
       version={version}
@@ -78,18 +80,20 @@ function Bootstrap({
   const [repeatPassword, setRepeatPassword] = useState("");
   const bootstrap = useMutation({
     mutationFn: () =>
-      request<AuthStatus>("/api/auth/bootstrap", {
+      requestJSON<AuthStatus>("/api/auth/bootstrap", {
         username,
         systemPassword,
         projectPassword,
       }),
     onSuccess: onComplete,
   });
+
   function submit(event: FormEvent) {
     event.preventDefault();
     if (projectPassword !== repeatPassword) return;
     bootstrap.mutate();
   }
+
   return (
     <AuthShell version={version}>
       <AuthCard
@@ -152,14 +156,19 @@ function Login({
   const [password, setPassword] = useState("");
   const login = useMutation({
     mutationFn: () =>
-      request<AuthStatus>("/api/auth/login", { username, password }),
+      requestJSON<AuthStatus>("/api/auth/login", { username, password }),
     onSuccess: onComplete,
   });
+
   return (
     <AuthShell version={version}>
       <AuthCard
         title={t("auth.signInTitle")}
-        description={t("auth.signInDescription", { username })}
+        description={
+          username
+            ? t("auth.signInDescription", { username })
+            : t("auth.projectPassword")
+        }
       >
         <form
           onSubmit={(event) => {
@@ -208,6 +217,7 @@ function AuthShell({
     </main>
   );
 }
+
 function AuthCard({
   title,
   description,
@@ -232,22 +242,7 @@ function AuthCard({
     </section>
   );
 }
-function LanguageSelect() {
-  const { i18n, t } = useTranslation();
-  return (
-    <label className="text-xs text-slate-400">
-      <span className="sr-only">{t("language.label")}</span>
-      <select
-        className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-slate-200"
-        value={i18n.resolvedLanguage === "zh-CN" ? "zh-CN" : "en"}
-        onChange={(event) => void i18n.changeLanguage(event.target.value)}
-      >
-        <option value="zh-CN">{t("language.chinese")}</option>
-        <option value="en">{t("language.english")}</option>
-      </select>
-    </label>
-  );
-}
+
 function Field({
   label,
   value,
@@ -283,6 +278,7 @@ function Field({
     </label>
   );
 }
+
 function AuthError({ error }: { error: Error | null }) {
   return error ? (
     <p className="rounded-lg bg-rose-950/50 p-3 text-sm text-rose-200">
@@ -290,24 +286,7 @@ function AuthError({ error }: { error: Error | null }) {
     </p>
   ) : null;
 }
-function ErrorText({ error }: { error: Error }) {
-  const { t } = useTranslation();
-  const apiError =
-    error instanceof ApiError ? error : new ApiError("internal_error");
-  return (
-    <>
-      {t(`errors.${apiError.code}`, {
-        ...apiError.params,
-        defaultValue: t("errors.internal_error"),
-      })}
-      {apiError.message !== apiError.code && (
-        <span className="mt-1 block break-words text-xs text-rose-300/80">
-          {apiError.message}
-        </span>
-      )}
-    </>
-  );
-}
+
 function SubmitButton({
   children,
   pending,
@@ -324,33 +303,4 @@ function SubmitButton({
       {pending ? t("auth.waiting") : children}
     </button>
   );
-}
-async function request<T = unknown>(
-  path: string,
-  body?: Record<string, unknown>,
-): Promise<T> {
-  const response = await fetch(path, {
-    method: body ? "POST" : "GET",
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!response.ok) {
-    const error = (await response.json().catch(() => null)) as {
-      code?: string;
-      message?: string;
-      detail?: string;
-      errors?: Array<{ message?: string }>;
-      params?: Record<string, unknown>;
-    } | null;
-    const message =
-      error?.message ?? error?.errors?.find((item) => item.message)?.message ?? error?.detail ?? "request_failed";
-    throw new ApiError(
-      error?.code ?? error?.detail ?? "request_failed",
-      error?.params,
-      message,
-    );
-  }
-  return response.status === 204
-    ? (undefined as T)
-    : (response.json() as Promise<T>);
 }

@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
+
+	"github.com/sgpublic/simplefsmanager/internal/apperr"
 )
 
 type Volume struct {
@@ -61,8 +64,9 @@ func (s *Store) RegisterVolume(ctx context.Context, uuid, serial string, partiti
 }
 
 // ConfigureVolume creates or updates the persistent mount path for a volume.
-// It does not mount the filesystem.
-func (s *Store) ConfigureVolume(ctx context.Context, uuid, serial string, partitionNumber int, mountPath string) (Volume, error) {
+// When autoMount is nil, an existing volume keeps its current auto-mount flag
+// and a newly created volume defaults to auto_mount = false.
+func (s *Store) ConfigureVolume(ctx context.Context, uuid, serial string, partitionNumber int, mountPath string, autoMount *bool) (Volume, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Volume{}, fmt.Errorf("begin volume configuration: %w", err)
@@ -78,13 +82,17 @@ func (s *Store) ConfigureVolume(ctx context.Context, uuid, serial string, partit
 			return Volume{}, fmt.Errorf("check volume mount path: %w", err)
 		}
 		if usedByOther {
-			return Volume{}, fmt.Errorf("mount path %s is already configured", mountPath)
+			return Volume{}, apperr.New(http.StatusConflict, apperr.CodeMountPathInUse, fmt.Sprintf("mount path %s is already configured", mountPath))
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE volumes SET mount_path = ?, auto_mount = 1 WHERE uuid = ?`, mountPath, uuid); err != nil {
+		nextAutoMount := volume.AutoMount
+		if autoMount != nil {
+			nextAutoMount = *autoMount
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE volumes SET mount_path = ?, auto_mount = ? WHERE uuid = ?`, mountPath, boolToInt(nextAutoMount), uuid); err != nil {
 			return Volume{}, fmt.Errorf("update volume mount path: %w", err)
 		}
 		volume.MountPath = mountPath
-		volume.AutoMount = true
+		volume.AutoMount = nextAutoMount
 		if err := tx.Commit(); err != nil {
 			return Volume{}, fmt.Errorf("commit volume configuration: %w", err)
 		}
@@ -103,19 +111,23 @@ func (s *Store) ConfigureVolume(ctx context.Context, uuid, serial string, partit
 		return Volume{}, fmt.Errorf("check volume mount path: %w", err)
 	}
 	if used {
-		return Volume{}, fmt.Errorf("mount path %s is already configured", mountPath)
+		return Volume{}, apperr.New(http.StatusConflict, apperr.CodeMountPathInUse, fmt.Sprintf("mount path %s is already configured", mountPath))
+	}
+	initialAutoMount := false
+	if autoMount != nil {
+		initialAutoMount = *autoMount
 	}
 	volume = Volume{
 		UUID:         uuid,
 		MountNumber:  mountNumber,
 		MountPath:    mountPath,
-		AutoMount:    true,
+		AutoMount:    initialAutoMount,
 		DeviceSerial: serial,
 		PartitionNum: partitionNumber,
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO volumes (uuid, device_serial, partition_number, mount_number, mount_path, auto_mount)
-		VALUES (?, ?, ?, ?, ?, 1)`, volume.UUID, volume.DeviceSerial, volume.PartitionNum, volume.MountNumber, volume.MountPath); err != nil {
+		VALUES (?, ?, ?, ?, ?, ?)`, volume.UUID, volume.DeviceSerial, volume.PartitionNum, volume.MountNumber, volume.MountPath, boolToInt(volume.AutoMount)); err != nil {
 		return Volume{}, fmt.Errorf("insert configured volume: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -130,7 +142,7 @@ func (s *Store) VolumeByUUID(ctx context.Context, uuid string) (Volume, error) {
 		FROM volumes WHERE uuid = ?`, uuid))
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return Volume{}, fmt.Errorf("managed volume %s not found", uuid)
+			return Volume{}, apperr.New(http.StatusNotFound, apperr.CodeManagedVolumeNotFound, fmt.Sprintf("managed volume %s not found", uuid))
 		}
 		return Volume{}, fmt.Errorf("query managed volume: %w", err)
 	}
@@ -160,34 +172,47 @@ func (s *Store) Volumes(ctx context.Context) ([]Volume, error) {
 	return volumes, nil
 }
 
-func (s *Store) ConfigureVolumePath(ctx context.Context, uuid, mountPath string) (Volume, error) {
+func (s *Store) ConfigureVolumePath(ctx context.Context, uuid, mountPath string, autoMount *bool) (Volume, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Volume{}, fmt.Errorf("begin volume path update: %w", err)
+	}
+	defer tx.Rollback()
+
+	existing, err := scanVolume(tx.QueryRowContext(ctx, `
+		SELECT uuid, mount_number, mount_path, auto_mount, device_serial, partition_number
+		FROM volumes WHERE uuid = ?`, uuid))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return Volume{}, apperr.New(http.StatusNotFound, apperr.CodeManagedVolumeNotFound, fmt.Sprintf("managed volume %s not found", uuid))
+		}
+		return Volume{}, fmt.Errorf("query managed volume: %w", err)
+	}
+
 	var usedByOther bool
-	if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM volumes WHERE mount_path = ? AND uuid <> ?)`, mountPath, uuid).Scan(&usedByOther); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM volumes WHERE mount_path = ? AND uuid <> ?)`, mountPath, uuid).Scan(&usedByOther); err != nil {
 		return Volume{}, fmt.Errorf("check volume mount path: %w", err)
 	}
 	if usedByOther {
-		return Volume{}, fmt.Errorf("mount path %s is already configured", mountPath)
+		return Volume{}, apperr.New(http.StatusConflict, apperr.CodeMountPathInUse, fmt.Sprintf("mount path %s is already configured", mountPath))
 	}
-	result, err := s.DB.ExecContext(ctx, `UPDATE volumes SET mount_path = ?, auto_mount = 1 WHERE uuid = ?`, mountPath, uuid)
-	if err != nil {
+	nextAutoMount := existing.AutoMount
+	if autoMount != nil {
+		nextAutoMount = *autoMount
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE volumes SET mount_path = ?, auto_mount = ? WHERE uuid = ?`, mountPath, boolToInt(nextAutoMount), uuid); err != nil {
 		return Volume{}, fmt.Errorf("update volume mount path: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return Volume{}, fmt.Errorf("count updated managed volumes: %w", err)
+	existing.MountPath = mountPath
+	existing.AutoMount = nextAutoMount
+	if err := tx.Commit(); err != nil {
+		return Volume{}, fmt.Errorf("commit volume path update: %w", err)
 	}
-	if affected != 1 {
-		return Volume{}, fmt.Errorf("managed volume %s not found", uuid)
-	}
-	return s.VolumeByUUID(ctx, uuid)
+	return existing, nil
 }
 
 func (s *Store) SetVolumeAutoMount(ctx context.Context, uuid string, enabled bool) (Volume, error) {
-	autoMount := 0
-	if enabled {
-		autoMount = 1
-	}
-	result, err := s.DB.ExecContext(ctx, `UPDATE volumes SET auto_mount = ? WHERE uuid = ?`, autoMount, uuid)
+	result, err := s.DB.ExecContext(ctx, `UPDATE volumes SET auto_mount = ? WHERE uuid = ?`, boolToInt(enabled), uuid)
 	if err != nil {
 		return Volume{}, fmt.Errorf("update volume auto-mount state: %w", err)
 	}
@@ -196,7 +221,7 @@ func (s *Store) SetVolumeAutoMount(ctx context.Context, uuid string, enabled boo
 		return Volume{}, fmt.Errorf("count updated managed volumes: %w", err)
 	}
 	if affected != 1 {
-		return Volume{}, fmt.Errorf("managed volume %s not found", uuid)
+		return Volume{}, apperr.New(http.StatusNotFound, apperr.CodeManagedVolumeNotFound, fmt.Sprintf("managed volume %s not found", uuid))
 	}
 	return s.VolumeByUUID(ctx, uuid)
 }
@@ -235,20 +260,6 @@ func (s *Store) AutoMountVolumes(ctx context.Context) ([]Volume, error) {
 	return volumes, nil
 }
 
-func (s *Store) DeleteVolume(ctx context.Context, uuid string) error {
-	result, err := s.DB.ExecContext(ctx, `DELETE FROM volumes WHERE uuid = ?`, uuid)
-	if err != nil {
-		return fmt.Errorf("delete managed volume: %w", err)
-	}
-	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-		if err != nil {
-			return fmt.Errorf("count deleted managed volumes: %w", err)
-		}
-		return fmt.Errorf("managed volume %s not found", uuid)
-	}
-	return nil
-}
-
 func (s *Store) DeleteVolumeIfExists(ctx context.Context, uuid string) error {
 	if uuid == "" {
 		return nil
@@ -281,4 +292,11 @@ func scanVolume(row rowScanner) (Volume, error) {
 	}
 	volume.AutoMount = autoMount == 1
 	return volume, nil
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

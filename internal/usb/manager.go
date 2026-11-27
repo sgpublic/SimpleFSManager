@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"sync"
 
+	"github.com/sgpublic/simplefsmanager/internal/apperr"
 	"github.com/sgpublic/simplefsmanager/internal/storage"
 	"golang.org/x/sys/unix"
 )
@@ -24,7 +26,7 @@ type Manager struct {
 }
 
 type storageManager interface {
-	List(context.Context) ([]storage.Disk, error)
+	ListTopology(context.Context) ([]storage.Disk, error)
 	Partition(context.Context, string) (storage.Disk, storage.Partition, error)
 	Mount(context.Context, string, string, string) error
 	Unmount(string) error
@@ -45,7 +47,7 @@ func (m *Manager) Reconcile(ctx context.Context, addedDiskPath string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	disks, err := m.storage.List(ctx)
+	disks, err := m.storage.ListTopology(ctx)
 	if err != nil {
 		return err
 	}
@@ -110,16 +112,16 @@ func (m *Manager) Mount(ctx context.Context, partitionPath string) (string, erro
 		return "", err
 	}
 	if !disk.USB {
-		return "", fmt.Errorf("%s is not a USB partition", partitionPath)
+		return "", apperr.New(http.StatusBadRequest, apperr.CodeNotUSBPartition, fmt.Sprintf("%s is not a USB partition", partitionPath))
 	}
 	if partition.FileSystem != "ext4" && partition.FileSystem != "xfs" {
-		return "", fmt.Errorf("USB partition must use ext4 or xfs")
+		return "", apperr.New(http.StatusBadRequest, apperr.CodeUnsupportedFilesystem, "USB partition must use ext4 or xfs")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	letter, ok := m.letters[disk.Path]
 	if !ok {
-		return "", fmt.Errorf("USB device has not been assigned a mount letter")
+		return "", apperr.New(http.StatusBadRequest, apperr.CodeUSBCapacityExceeded, "USB device has not been assigned a mount letter")
 	}
 	target, err := usbTarget(letter, partition.Number)
 	if err != nil {
@@ -138,13 +140,13 @@ func (m *Manager) Unmount(ctx context.Context, partitionPath string) (string, er
 		return "", err
 	}
 	if !disk.USB {
-		return "", fmt.Errorf("%s is not a USB partition", partitionPath)
+		return "", apperr.New(http.StatusBadRequest, apperr.CodeNotUSBPartition, fmt.Sprintf("%s is not a USB partition", partitionPath))
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	letter, ok := m.letters[disk.Path]
 	if !ok {
-		return "", fmt.Errorf("USB device has not been assigned a mount letter")
+		return "", apperr.New(http.StatusBadRequest, apperr.CodeUSBCapacityExceeded, "USB device has not been assigned a mount letter")
 	}
 	target, err := usbTarget(letter, partition.Number)
 	if err != nil {
@@ -174,7 +176,7 @@ func (m *Manager) assign(path string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("too many USB devices")
+	return apperr.New(http.StatusBadRequest, apperr.CodeUSBCapacityExceeded, "too many USB devices")
 }
 
 func (m *Manager) mountDisk(ctx context.Context, disk storage.Disk, letter rune) error {
@@ -204,7 +206,7 @@ func detach(letter rune) {
 
 func usbTarget(device rune, partitionNumber int) (string, error) {
 	if partitionNumber < 1 || partitionNumber > 26 {
-		return "", fmt.Errorf("USB device supports at most 26 partitions")
+		return "", apperr.New(http.StatusBadRequest, apperr.CodeUSBCapacityExceeded, "USB device supports at most 26 partitions")
 	}
 	return fmt.Sprintf("/usb%c%c", device, rune('a'+partitionNumber-1)), nil
 }

@@ -236,3 +236,97 @@ func TestSmartRejectsNonPhysicalDisk(t *testing.T) {
 		t.Fatal("expected non-physical disk to be rejected")
 	}
 }
+
+type countingSmartRunner struct {
+	lsblkOutput []byte
+	smartCalls  int
+}
+
+func (r *countingSmartRunner) Run(_ context.Context, name string, _ ...string) ([]byte, error) {
+	if name != "lsblk" {
+		return nil, fmt.Errorf("unexpected command %s", name)
+	}
+	return r.lsblkOutput, nil
+}
+
+func (r *countingSmartRunner) RunOutput(_ context.Context, name string, _ ...string) ([]byte, error) {
+	if name == "smartctl" {
+		r.smartCalls++
+		return []byte(`{"temperature":{"current":35},"smart_status":{"passed":true}}`), nil
+	}
+	return nil, fmt.Errorf("unexpected command %s", name)
+}
+
+func TestListTopologySkipsSmartctl(t *testing.T) {
+	runner := &countingSmartRunner{
+		lsblkOutput: []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","size":1000,"mountpoints":[null]}]}`),
+	}
+	manager := &Manager{runner: runner}
+
+	disks, err := manager.ListTopology(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(disks) != 1 {
+		t.Fatalf("disks = %d, want 1", len(disks))
+	}
+	if runner.smartCalls != 0 {
+		t.Fatalf("smartctl called %d times during ListTopology, want 0", runner.smartCalls)
+	}
+}
+
+func TestListExtractsNVMeDataWrittenAndSolidState(t *testing.T) {
+	manager := &Manager{runner: smartMetadataRunner{
+		lsblkOutput: []byte(`{"blockdevices":[{"name":"nvme0n1","path":"/dev/nvme0n1","type":"disk","size":1000,"rota":false,"mountpoints":[null]}]}`),
+		smartOutput: []byte(`{"device":{"protocol":"NVMe"},"smart_status":{"passed":true},"nvme_smart_health_information_log":{"temperature":42,"power_on_hours":1200,"data_units_written":25000000}}`),
+	}}
+
+	disks, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk := disks[0]
+	if disk.SolidState == nil || !*disk.SolidState {
+		t.Fatalf("SolidState = %#v, want true", disk.SolidState)
+	}
+	wantWritten := uint64(25000000) * 512000
+	if disk.DataWrittenBytes == nil || *disk.DataWrittenBytes != wantWritten {
+		t.Fatalf("DataWrittenBytes = %#v, want %d", disk.DataWrittenBytes, wantWritten)
+	}
+	if disk.PowerOnHours == nil || *disk.PowerOnHours != 1200 {
+		t.Fatalf("PowerOnHours = %#v, want 1200", disk.PowerOnHours)
+	}
+}
+
+func TestListExtractsSATASSDWrittenAndHDDPowerOnHours(t *testing.T) {
+	sataSSD := &Manager{runner: smartMetadataRunner{
+		lsblkOutput: []byte(`{"blockdevices":[{"name":"sdb","path":"/dev/sdb","type":"disk","size":1000,"mountpoints":[null]}]}`),
+		smartOutput: []byte(`{"rotation_rate":0,"logical_block_size":512,"ata_smart_attributes":{"table":[{"id":241,"name":"Host_Writes_32MiB","raw":{"value":1000}}]}}`),
+	}}
+	disks, err := sataSSD.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBytes := uint64(1000) * 32 * 1024 * 1024
+	if disks[0].SolidState == nil || !*disks[0].SolidState {
+		t.Fatalf("SATA SSD SolidState = %#v, want true", disks[0].SolidState)
+	}
+	if disks[0].DataWrittenBytes == nil || *disks[0].DataWrittenBytes != wantBytes {
+		t.Fatalf("SATA SSD DataWrittenBytes = %#v, want %d", disks[0].DataWrittenBytes, wantBytes)
+	}
+
+	hdd := &Manager{runner: smartMetadataRunner{
+		lsblkOutput: []byte(`{"blockdevices":[{"name":"sdc","path":"/dev/sdc","type":"disk","size":4000,"rota":true,"mountpoints":[null]}]}`),
+		smartOutput: []byte(`{"rotation_rate":7200,"power_on_time":{"hours":21024},"smart_status":{"passed":true}}`),
+	}}
+	hddDisks, err := hdd.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hddDisks[0].SolidState == nil || *hddDisks[0].SolidState {
+		t.Fatalf("HDD SolidState = %#v, want false", hddDisks[0].SolidState)
+	}
+	if hddDisks[0].PowerOnHours == nil || *hddDisks[0].PowerOnHours != 21024 {
+		t.Fatalf("HDD PowerOnHours = %#v, want 21024", hddDisks[0].PowerOnHours)
+	}
+}

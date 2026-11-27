@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
 	"time"
+
+	"github.com/sgpublic/simplefsmanager/internal/apperr"
 )
 
 type User struct {
@@ -29,11 +32,12 @@ func (s *Store) CreateAdministrator(ctx context.Context, username, passwordHash 
 	if err != nil {
 		return User{}, fmt.Errorf("create administrator: %w", err)
 	}
-	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-		if err != nil {
-			return User{}, fmt.Errorf("count created administrator: %w", err)
-		}
-		return User{}, fmt.Errorf("administrator is already configured")
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return User{}, fmt.Errorf("count created administrator: %w", err)
+	}
+	if affected != 1 {
+		return User{}, apperr.New(http.StatusConflict, apperr.CodeAuthAlreadyConfigured, "administrator is already configured")
 	}
 	return User{ID: 1, Username: username, PasswordHash: passwordHash}, nil
 }
@@ -42,19 +46,11 @@ func (s *Store) UserByUsername(ctx context.Context, username string) (User, erro
 	var user User
 	if err := s.DB.QueryRowContext(ctx, `SELECT id, username, password_hash FROM users WHERE username = ?`, username).Scan(&user.ID, &user.Username, &user.PasswordHash); err != nil {
 		if err == sql.ErrNoRows {
-			return User{}, fmt.Errorf("invalid username or password")
+			return User{}, apperr.New(http.StatusUnauthorized, apperr.CodeAuthInvalidCredentials, "invalid username or password")
 		}
 		return User{}, fmt.Errorf("load administrator: %w", err)
 	}
 	return user, nil
-}
-
-func (s *Store) AdministratorUsername(ctx context.Context) (string, error) {
-	var username string
-	if err := s.DB.QueryRowContext(ctx, `SELECT username FROM users WHERE id = 1`).Scan(&username); err != nil {
-		return "", fmt.Errorf("load administrator username: %w", err)
-	}
-	return username, nil
 }
 
 func (s *Store) CreateSession(ctx context.Context, tokenHash string, userID int64, expiresAt time.Time) error {
@@ -72,14 +68,14 @@ func (s *Store) SessionUser(ctx context.Context, tokenHash string, now time.Time
 		FROM sessions JOIN users ON users.id = sessions.user_id
 		WHERE sessions.id = ?`, tokenHash).Scan(&user.ID, &user.Username, &user.PasswordHash, &expiresAt); err != nil {
 		if err == sql.ErrNoRows {
-			return User{}, fmt.Errorf("invalid session")
+			return User{}, apperr.New(http.StatusUnauthorized, apperr.CodeAuthRequired, "invalid session")
 		}
 		return User{}, fmt.Errorf("load session: %w", err)
 	}
 	expires, err := time.Parse(time.RFC3339, expiresAt)
 	if err != nil || !expires.After(now) {
 		_ = s.DeleteSession(ctx, tokenHash)
-		return User{}, fmt.Errorf("expired session")
+		return User{}, apperr.New(http.StatusUnauthorized, apperr.CodeAuthRequired, "expired session")
 	}
 	return user, nil
 }
@@ -87,6 +83,14 @@ func (s *Store) SessionUser(ctx context.Context, tokenHash string, now time.Time
 func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, tokenHash); err != nil {
 		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+// DeleteExpiredSessions removes all sessions that expired at or before now.
+func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) error {
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, now.UTC().Format(time.RFC3339)); err != nil {
+		return fmt.Errorf("delete expired sessions: %w", err)
 	}
 	return nil
 }

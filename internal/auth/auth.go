@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,19 +13,32 @@ import (
 	"strings"
 	"time"
 
-	"github.com/msteinert/pam/v2"
+	"github.com/sgpublic/simplefsmanager/internal/apperr"
 	"github.com/sgpublic/simplefsmanager/internal/store"
 	"golang.org/x/crypto/argon2"
 )
 
 const (
-	cookieName      = "simplefsmanager_session"
-	sessionLifetime = 24 * time.Hour
-	argonTime       = 3
-	argonMemory     = 64 * 1024
-	argonThreads    = 4
-	argonKeyLength  = 32
+	cookieName        = "simplefsmanager_session"
+	sessionLifetime   = 24 * time.Hour
+	minPasswordLength = 12
+	argonTime         = 3
+	argonMemory       = 64 * 1024
+	argonThreads      = 4
+	argonKeyLength    = 32
 )
+
+// dummyPasswordHash is verified when a login targets an unknown username so
+// failed lookups spend the same Argon2id time as invalid password attempts.
+var dummyPasswordHash = func() string {
+	salt := []byte("simplefsmanager!")
+	key := argon2.IDKey([]byte("dummy-password-for-timing"), salt, argonTime, argonMemory, argonThreads, argonKeyLength)
+	return fmt.Sprintf("argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
+		argonMemory, argonTime, argonThreads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key),
+	)
+}()
 
 type Service struct {
 	store *store.Store
@@ -63,18 +75,27 @@ func (s *Service) Bootstrap(ctx context.Context, username, systemPassword, proje
 		return "", err
 	}
 	if !setupRequired {
-		return "", errors.New("administrator is already configured")
+		return "", apperr.New(http.StatusConflict, apperr.CodeAuthAlreadyConfigured, "administrator is already configured")
 	}
 	if err := eligibleLocalUser(username); err != nil {
 		return "", err
 	}
 	if err := authenticatePAM(username, systemPassword); err != nil {
-		return "", errors.New("system authentication failed")
+		return "", apperr.New(http.StatusUnauthorized, apperr.CodeAuthSystemAuthFailed, "system authentication failed")
 	}
-	if len(projectPassword) < 12 {
-		return "", errors.New("project password must be at least 12 characters")
+	if len(projectPassword) < minPasswordLength {
+		return "", apperr.WithParams(
+			http.StatusBadRequest,
+			apperr.CodeAuthPasswordTooShort,
+			fmt.Sprintf("project password must be at least %d characters", minPasswordLength),
+			map[string]any{"minLength": minPasswordLength},
+		)
 	}
-	user, err := s.store.CreateAdministrator(ctx, username, hashPassword(projectPassword))
+	encodedHash, err := hashPassword(projectPassword)
+	if err != nil {
+		return "", err
+	}
+	user, err := s.store.CreateAdministrator(ctx, username, encodedHash)
 	if err != nil {
 		return "", err
 	}
@@ -87,11 +108,18 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 		return "", err
 	}
 	if setupRequired {
-		return "", errors.New("administrator setup is required")
+		return "", apperr.New(http.StatusConflict, apperr.CodeAuthSetupRequired, "administrator setup is required")
 	}
 	user, err := s.store.UserByUsername(ctx, username)
-	if err != nil || !verifyPassword(user.PasswordHash, password) {
-		return "", errors.New("invalid username or password")
+	if err != nil {
+		if apperr.IsCode(err, apperr.CodeAuthInvalidCredentials) {
+			_ = verifyPassword(dummyPasswordHash, password)
+			return "", err
+		}
+		return "", err
+	}
+	if !verifyPassword(user.PasswordHash, password) {
+		return "", apperr.New(http.StatusUnauthorized, apperr.CodeAuthInvalidCredentials, "invalid username or password")
 	}
 	return s.createSession(ctx, user.ID)
 }
@@ -99,7 +127,7 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 func (s *Service) User(ctx context.Context, request *http.Request) (store.User, error) {
 	cookie, err := request.Cookie(cookieName)
 	if err != nil || cookie.Value == "" {
-		return store.User{}, errors.New("missing session")
+		return store.User{}, apperr.New(http.StatusUnauthorized, apperr.CodeAuthRequired, "missing session")
 	}
 	return s.store.SessionUser(ctx, tokenHash(cookie.Value), time.Now())
 }
@@ -120,7 +148,7 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 		if _, err := s.User(request.Context(), request); err != nil {
 			writer.Header().Set("Content-Type", "application/json")
 			writer.WriteHeader(http.StatusUnauthorized)
-			_, _ = writer.Write([]byte(`{"code":"auth_required"}`))
+			_, _ = writer.Write([]byte(`{"code":"auth_required","message":"sign in is required"}`))
 			return
 		}
 		next.ServeHTTP(writer, request)
@@ -128,6 +156,14 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 }
 
 func SessionCookie(token string) *http.Cookie {
+	return sessionCookie(token, false)
+}
+
+func SessionCookieForRequest(request *http.Request, token string) *http.Cookie {
+	return sessionCookie(token, isSecureRequest(request))
+}
+
+func sessionCookie(token string, secure bool) *http.Cookie {
 	return &http.Cookie{
 		Name:     cookieName,
 		Value:    token,
@@ -135,12 +171,42 @@ func SessionCookie(token string) *http.Cookie {
 		MaxAge:   int(sessionLifetime.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   false,
+		Secure:   secure,
 	}
 }
 
 func ExpiredSessionCookie() *http.Cookie {
-	return &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode}
+	return expiredSessionCookie(false)
+}
+
+func ExpiredSessionCookieForRequest(request *http.Request) *http.Cookie {
+	return expiredSessionCookie(isSecureRequest(request))
+}
+
+func expiredSessionCookie(secure bool) *http.Cookie {
+	return &http.Cookie{
+		Name:     cookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   secure,
+	}
+}
+
+func isSecureRequest(request *http.Request) bool {
+	if request == nil {
+		return false
+	}
+	if request.TLS != nil {
+		return true
+	}
+	proto := request.Header.Get("X-Forwarded-Proto")
+	if first, _, ok := strings.Cut(proto, ","); ok {
+		proto = first
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
 func (s *Service) createSession(ctx context.Context, userID int64) (string, error) {
@@ -149,61 +215,40 @@ func (s *Service) createSession(ctx context.Context, userID int64) (string, erro
 		return "", fmt.Errorf("generate session token: %w", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(bytes)
-	if err := s.store.CreateSession(ctx, tokenHash(token), userID, time.Now().Add(sessionLifetime)); err != nil {
+	now := time.Now()
+	if err := s.store.CreateSession(ctx, tokenHash(token), userID, now.Add(sessionLifetime)); err != nil {
 		return "", err
 	}
+	_ = s.store.DeleteExpiredSessions(ctx, now)
 	return token, nil
 }
 
 func eligibleLocalUser(username string) error {
-	for _, line := range strings.Split(string(mustReadPasswd()), "\n") {
+	contents, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return fmt.Errorf("read /etc/passwd: %w", err)
+	}
+	for _, line := range strings.Split(string(contents), "\n") {
 		fields := strings.Split(line, ":")
 		if len(fields) < 7 || fields[0] != username {
 			continue
 		}
 		uid, err := strconv.Atoi(fields[2])
 		if err != nil || uid < 1000 || uid == 65534 || fields[6] == "/usr/sbin/nologin" || fields[6] == "/bin/false" {
-			return errors.New("administrator must be an eligible local non-root user")
+			return apperr.New(http.StatusBadRequest, apperr.CodeAuthLocalUserRequired, "administrator must be an eligible local non-root user")
 		}
 		return nil
 	}
-	return errors.New("administrator must be an eligible local non-root user")
+	return apperr.New(http.StatusBadRequest, apperr.CodeAuthLocalUserRequired, "administrator must be an eligible local non-root user")
 }
 
-func mustReadPasswd() []byte {
-	contents, err := os.ReadFile("/etc/passwd")
-	if err != nil {
-		return nil
-	}
-	return contents
-}
-
-func authenticatePAM(username, password string) error {
-	transaction, err := pam.StartFunc("simplefsmanager", username, func(style pam.Style, _ string) (string, error) {
-		switch style {
-		case pam.PromptEchoOff:
-			return password, nil
-		case pam.PromptEchoOn:
-			return username, nil
-		default:
-			return "", errors.New("unsupported PAM conversation")
-		}
-	})
-	if err != nil {
-		return err
-	}
-	defer transaction.End()
-	if err := transaction.Authenticate(pam.DisallowNullAuthtok); err != nil {
-		return err
-	}
-	return transaction.AcctMgmt(pam.DisallowNullAuthtok)
-}
-
-func hashPassword(password string) string {
+func hashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
-	_, _ = rand.Read(salt)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("generate password salt: %w", err)
+	}
 	key := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLength)
-	return fmt.Sprintf("argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", argonMemory, argonTime, argonThreads, base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(key))
+	return fmt.Sprintf("argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", argonMemory, argonTime, argonThreads, base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(key)), nil
 }
 
 func verifyPassword(encoded, password string) bool {
