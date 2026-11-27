@@ -17,7 +17,13 @@ SimpleFSManager 是一个面向单管理员的 Linux 磁盘管理 Web 界面，�
 
 ## 使用
 
-首次访问时，请使用符合条件的本机 Linux 用户完成 PAM 认证，并设置独立的 SimpleFSManager 项目密码。后续登录必须输入已绑定的用户名和项目密码。
+首次启动时，SimpleFSManager 会自动创建默认管理员账户（默认用户名 `admin`），并在控制台日志中输出一次性随机初始密码（可通过 `journalctl -u simplefsmanager` 查看）。也可以在首次启动前通过环境变量自定义初始凭据（仅首次初始化时生效）：
+
+```sh
+SFM_ADMIN_USERNAME=admin SFM_ADMIN_PASSWORD=your-strong-password simplefsmanager
+```
+
+登录后可在 Web 界面右上角点击“修改密码”更新管理员密码。
 
 带标签的发布会在 GitHub Releases 中提供 `amd64` Debian 软件包。安装后服务会自动启用并启动：
 
@@ -33,13 +39,6 @@ systemctl status simplefsmanager
 ## 构建与开发
 
 需要 Go 1.26+、Node.js 24+、npm，以及功能所需的 Linux 工具。`lsblk`、`blkid`、`smartctl` 和 `mkfs.ext4` 分别用于磁盘发现、文件系统信息、SMART 数据和 ext4 格式化。XFS、btrfs 和 f2fs 格式化还分别需要 `mkfs.xfs`、`mkfs.btrfs` 和 `mkfs.f2fs`。
-
-构建前请安装 PAM 开发头文件，并在首次登录前安装提供的 PAM 服务文件：
-
-```sh
-sudo apt install libpam0g-dev
-sudo install -m 644 deploy/simplefsmanager.pam /etc/pam.d/simplefsmanager
-```
 
 运行 API：
 

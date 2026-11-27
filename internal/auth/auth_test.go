@@ -20,6 +20,9 @@ func TestPublicEndpoint(t *testing.T) {
 	if publicEndpoint(http.MethodPost, "/api/build-info") {
 		t.Fatal("build-info endpoint must not allow POST without authentication")
 	}
+	if publicEndpoint(http.MethodPost, "/api/auth/password") {
+		t.Fatal("password endpoint must require authentication")
+	}
 }
 
 func TestRateLimiterWindowAndReset(t *testing.T) {
@@ -67,36 +70,122 @@ func TestSessionCookieForRequestRespectsTLSAndProxyHeaders(t *testing.T) {
 	}
 }
 
-func TestPasswordHashVerifyAndLogin(t *testing.T) {
+func TestEnsureAdministratorGeneratesRandomPasswordAndIgnoresSubsequentEnv(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
 
-	encoded, err := hashPassword("correct-horse-battery-staple")
+	ctx := context.Background()
+	svc := New(database)
+
+	first, err := svc.EnsureAdministrator(ctx, BootstrapOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !verifyPassword(encoded, "correct-horse-battery-staple") {
-		t.Fatal("expected valid password to verify")
-	}
-	if verifyPassword(encoded, "wrong-password") {
-		t.Fatal("expected wrong password to fail verification")
+	if !first.Created || first.Username != DefaultAdminUsername || len(first.GeneratedPassword) != generatedPasswordLength {
+		t.Fatalf("first init = %#v", first)
 	}
 
-	if _, err := database.CreateAdministrator(context.Background(), "admin", encoded); err != nil {
+	if _, err := svc.Login(ctx, DefaultAdminUsername, first.GeneratedPassword); err != nil {
+		t.Fatalf("login with generated password failed: %v", err)
+	}
+
+	// Second startup with env vars set must NOT overwrite existing credentials.
+	second, err := svc.EnsureAdministrator(ctx, BootstrapOptions{
+		Username: "other-admin",
+		Password: "override-attempt-password",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	if second.Created || second.GeneratedPassword != "" || second.Username != DefaultAdminUsername {
+		t.Fatalf("second init = %#v, want existing admin without changes", second)
+	}
+	if _, err := svc.Login(ctx, "other-admin", "override-attempt-password"); !apperr.IsCode(err, apperr.CodeAuthInvalidCredentials) {
+		t.Fatalf("env override should be ignored on subsequent startup, got err=%v", err)
+	}
+	if _, err := svc.Login(ctx, DefaultAdminUsername, first.GeneratedPassword); err != nil {
+		t.Fatalf("original generated password stopped working: %v", err)
+	}
+}
+
+func TestEnsureAdministratorUsesEnvOnFirstStartup(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
 	svc := New(database)
-	if _, err := svc.Login(context.Background(), "unknown", "wrong-password"); !apperr.IsCode(err, apperr.CodeAuthInvalidCredentials) {
-		t.Fatalf("unknown user error = %v, want %s", err, apperr.CodeAuthInvalidCredentials)
+
+	res, err := svc.EnsureAdministrator(ctx, BootstrapOptions{
+		Username: "ops-admin",
+		Password: "initial-env-password",
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := svc.Login(context.Background(), "admin", "wrong-password"); !apperr.IsCode(err, apperr.CodeAuthInvalidCredentials) {
-		t.Fatalf("wrong password error = %v, want %s", err, apperr.CodeAuthInvalidCredentials)
+	if !res.Created || res.Username != "ops-admin" || res.GeneratedPassword != "" {
+		t.Fatalf("env init = %#v", res)
 	}
-	token, err := svc.Login(context.Background(), "admin", "correct-horse-battery-staple")
-	if err != nil || token == "" {
-		t.Fatalf("valid login failed: token=%q err=%v", token, err)
+	if _, err := svc.Login(ctx, "ops-admin", "initial-env-password"); err != nil {
+		t.Fatalf("login with env credentials failed: %v", err)
+	}
+}
+
+func TestChangePasswordValidatesAndRevokesOldSessions(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	svc := New(database)
+	if _, err := svc.EnsureAdministrator(ctx, BootstrapOptions{Password: "old-strong-password"}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldToken, err := svc.Login(ctx, DefaultAdminUsername, "old-strong-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, exists, err := database.Administrator(ctx)
+	if err != nil || !exists {
+		t.Fatalf("load admin: %v, exists=%t", err, exists)
+	}
+
+	if _, err := svc.ChangePassword(ctx, user, "wrong-password", "new-strong-password"); !apperr.IsCode(err, apperr.CodeAuthInvalidCredentials) {
+		t.Fatalf("wrong current password err = %v, want %s", err, apperr.CodeAuthInvalidCredentials)
+	}
+	if _, err := svc.ChangePassword(ctx, user, "old-strong-password", "short"); !apperr.IsCode(err, apperr.CodeAuthPasswordTooShort) {
+		t.Fatalf("short new password err = %v, want %s", err, apperr.CodeAuthPasswordTooShort)
+	}
+
+	newToken, err := svc.ChangePassword(ctx, user, "old-strong-password", "new-strong-password-123")
+	if err != nil || newToken == "" || newToken == oldToken {
+		t.Fatalf("ChangePassword failed: token=%q err=%v", newToken, err)
+	}
+
+	oldReq := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	oldReq.AddCookie(SessionCookie(oldToken))
+	if _, err := svc.User(ctx, oldReq); err == nil {
+		t.Fatal("expected old session to be revoked after password change")
+	}
+
+	newReq := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	newReq.AddCookie(SessionCookie(newToken))
+	if _, err := svc.User(ctx, newReq); err != nil {
+		t.Fatalf("expected new session to be valid: %v", err)
+	}
+
+	if _, err := svc.Login(ctx, DefaultAdminUsername, "old-strong-password"); !apperr.IsCode(err, apperr.CodeAuthInvalidCredentials) {
+		t.Fatalf("old password should no longer work, got %v", err)
+	}
+	if _, err := svc.Login(ctx, DefaultAdminUsername, "new-strong-password-123"); err != nil {
+		t.Fatalf("new password login failed: %v", err)
 	}
 }

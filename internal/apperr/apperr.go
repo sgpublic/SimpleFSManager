@@ -6,11 +6,7 @@ import (
 )
 
 const (
-	CodeAuthAlreadyConfigured   = "auth_already_configured"
-	CodeAuthLocalUserRequired   = "auth_local_user_required"
-	CodeAuthSystemAuthFailed    = "auth_system_auth_failed"
 	CodeAuthPasswordTooShort    = "auth_password_too_short"
-	CodeAuthSetupRequired       = "auth_setup_required"
 	CodeAuthInvalidCredentials  = "auth_invalid_credentials"
 	CodeAuthRequired            = "auth_required"
 	CodeAuthRateLimited         = "auth_rate_limited"

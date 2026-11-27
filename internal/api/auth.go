@@ -17,15 +17,14 @@ const (
 	authRateLimitWindow = 5 * time.Minute
 )
 
-type bootstrapRequest struct {
-	Username        string `json:"username"`
-	SystemPassword  string `json:"systemPassword"`
-	ProjectPassword string `json:"projectPassword"`
-}
-
 type loginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
 }
 
 func (s *server) registerAuthRoutes(router chi.Router) {
@@ -37,33 +36,6 @@ func (s *server) registerAuthRoutes(router chi.Router) {
 			return
 		}
 		writeJSON(writer, http.StatusOK, status)
-	})
-
-	router.Post("/api/auth/bootstrap", func(writer http.ResponseWriter, request *http.Request) {
-		clientKey := clientIP(request)
-		if !s.limiter.Allow(clientKey) {
-			writeError(writer, http.StatusTooManyRequests, apperr.New(http.StatusTooManyRequests, apperr.CodeAuthRateLimited, "too many authentication attempts; try again later"))
-			return
-		}
-		request.Body = http.MaxBytesReader(writer, request.Body, authBodyLimit)
-		var input bootstrapRequest
-		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
-			writeError(writer, http.StatusBadRequest, apperr.New(http.StatusBadRequest, "request_failed", "invalid request body"))
-			return
-		}
-		token, err := s.auth.Bootstrap(request.Context(), input.Username, input.SystemPassword, input.ProjectPassword)
-		if err != nil {
-			status := apperr.Status(err)
-			if status >= http.StatusInternalServerError {
-				logOperationError(s.logger, "bootstrap authentication", err)
-			}
-			writeError(writer, status, err)
-			return
-		}
-		s.limiter.Reset(clientKey)
-		http.SetCookie(writer, auth.SessionCookieForRequest(request, token))
-		logOperationSuccess(s.logger, "bootstrap authentication")
-		writeJSON(writer, http.StatusCreated, auth.Status{Authenticated: true, Username: input.Username})
 	})
 
 	router.Post("/api/auth/login", func(writer http.ResponseWriter, request *http.Request) {
@@ -91,6 +63,32 @@ func (s *server) registerAuthRoutes(router chi.Router) {
 		http.SetCookie(writer, auth.SessionCookieForRequest(request, token))
 		logOperationSuccess(s.logger, "log in")
 		writeJSON(writer, http.StatusOK, auth.Status{Authenticated: true, Username: input.Username})
+	})
+
+	router.Post("/api/auth/password", func(writer http.ResponseWriter, request *http.Request) {
+		user, err := s.auth.User(request.Context(), request)
+		if err != nil {
+			writeError(writer, apperr.Status(err), err)
+			return
+		}
+		request.Body = http.MaxBytesReader(writer, request.Body, authBodyLimit)
+		var input changePasswordRequest
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			writeError(writer, http.StatusBadRequest, apperr.New(http.StatusBadRequest, "request_failed", "invalid request body"))
+			return
+		}
+		token, err := s.auth.ChangePassword(request.Context(), user, input.CurrentPassword, input.NewPassword)
+		if err != nil {
+			status := apperr.Status(err)
+			if status >= http.StatusInternalServerError {
+				logOperationError(s.logger, "change password", err)
+			}
+			writeError(writer, status, err)
+			return
+		}
+		http.SetCookie(writer, auth.SessionCookieForRequest(request, token))
+		logOperationSuccess(s.logger, "change password", "username", user.Username)
+		writer.WriteHeader(http.StatusNoContent)
 	})
 
 	router.Post("/api/auth/logout", func(writer http.ResponseWriter, request *http.Request) {

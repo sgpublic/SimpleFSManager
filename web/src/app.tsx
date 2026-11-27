@@ -49,11 +49,6 @@ export function App() {
       </AuthShell>
     );
   }
-  if (status.data?.setupRequired) {
-    return (
-      <Bootstrap version={version} onComplete={() => void status.refetch()} />
-    );
-  }
   if (!status.data?.authenticated) {
     return <Login version={version} onComplete={() => void status.refetch()} />;
   }
@@ -66,84 +61,6 @@ export function App() {
   );
 }
 
-function Bootstrap({
-  version,
-  onComplete,
-}: {
-  version: string;
-  onComplete: () => void;
-}) {
-  const { t } = useTranslation();
-  const [username, setUsername] = useState("");
-  const [systemPassword, setSystemPassword] = useState("");
-  const [projectPassword, setProjectPassword] = useState("");
-  const [repeatPassword, setRepeatPassword] = useState("");
-  const bootstrap = useMutation({
-    mutationFn: () =>
-      requestJSON<AuthStatus>("/api/auth/bootstrap", {
-        username,
-        systemPassword,
-        projectPassword,
-      }),
-    onSuccess: onComplete,
-  });
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    if (projectPassword !== repeatPassword) return;
-    bootstrap.mutate();
-  }
-
-  return (
-    <AuthShell version={version}>
-      <AuthCard
-        title={t("auth.initializeTitle")}
-        description={t("auth.initializeDescription")}
-      >
-        <form onSubmit={submit} className="space-y-4">
-          <Field
-            label={t("auth.localUsername")}
-            value={username}
-            onChange={setUsername}
-            autoComplete="username"
-          />
-          <Field
-            label={t("auth.systemPassword")}
-            value={systemPassword}
-            onChange={setSystemPassword}
-            type="password"
-            autoComplete="current-password"
-          />
-          <Field
-            label={t("auth.projectPassword")}
-            value={projectPassword}
-            onChange={setProjectPassword}
-            type="password"
-            autoComplete="new-password"
-            hint={t("auth.passwordHint")}
-          />
-          <Field
-            label={t("auth.repeatPassword")}
-            value={repeatPassword}
-            onChange={setRepeatPassword}
-            type="password"
-            autoComplete="new-password"
-          />
-          {projectPassword !== repeatPassword && (
-            <p className="text-xs text-rose-300">
-              {t("auth.passwordMismatch")}
-            </p>
-          )}
-          <AuthError error={bootstrap.error} />
-          <SubmitButton pending={bootstrap.isPending}>
-            {t("auth.initialize")}
-          </SubmitButton>
-        </form>
-      </AuthCard>
-    </AuthShell>
-  );
-}
-
 function Login({
   version,
   onComplete,
@@ -152,7 +69,7 @@ function Login({
   onComplete: () => void;
 }) {
   const { t } = useTranslation();
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const login = useMutation({
     mutationFn: () =>
@@ -160,23 +77,18 @@ function Login({
     onSuccess: onComplete,
   });
 
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    login.mutate();
+  }
+
   return (
     <AuthShell version={version}>
       <AuthCard
         title={t("auth.signInTitle")}
-        description={
-          username
-            ? t("auth.signInDescription", { username })
-            : t("auth.projectPassword")
-        }
+        description={t("auth.signInHint")}
       >
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            login.mutate();
-          }}
-          className="space-y-4"
-        >
+        <form onSubmit={submit} className="space-y-4">
           <Field
             label={t("auth.username")}
             value={username}
@@ -184,7 +96,7 @@ function Login({
             autoComplete="username"
           />
           <Field
-            label={t("auth.projectPassword")}
+            label={t("auth.password")}
             value={password}
             onChange={setPassword}
             type="password"
@@ -248,7 +160,6 @@ function Field({
   value,
   onChange,
   type = "text",
-  hint,
   disabled,
   autoComplete,
 }: {
@@ -256,7 +167,6 @@ function Field({
   value: string;
   onChange: (value: string) => void;
   type?: string;
-  hint?: string;
   disabled?: boolean;
   autoComplete?: string;
 }) {
@@ -272,9 +182,6 @@ function Field({
         autoComplete={autoComplete}
         required
       />
-      {hint && (
-        <span className="mt-1 block text-xs text-slate-500">{hint}</span>
-      )}
     </label>
   );
 }

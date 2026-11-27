@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HardDrive, LogOut, Power, RefreshCw } from "lucide-react";
+import { HardDrive, KeyRound, LogOut, Power, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ChangePasswordDialog } from "./components/ChangePasswordDialog";
 import { DiskCard } from "./components/DiskCard";
 import { LanguageSelect } from "./components/LanguageSelect";
 import {
@@ -42,6 +43,8 @@ export function Dashboard({
     path: string;
     solidState?: boolean;
   } | null>(null);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+  const [passwordChangedNotice, setPasswordChangedNotice] = useState(false);
   const [rebootRequired, setRebootRequired] = useState(false);
 
   const disks = useQuery({
@@ -135,6 +138,17 @@ export function Dashboard({
             <LanguageSelect />
             <button
               type="button"
+              onClick={() => {
+                setPasswordChangedNotice(false);
+                setChangePasswordOpen(true);
+              }}
+              className="inline-flex items-center gap-2 text-sm text-slate-300 hover:text-cyan-300"
+            >
+              <KeyRound size={16} />
+              {t("auth.changePassword")}
+            </button>
+            <button
+              type="button"
               onClick={requestRestart}
               className="inline-flex items-center gap-2 text-sm text-amber-300 hover:text-amber-100"
             >
@@ -190,6 +204,11 @@ export function Dashboard({
             </div>
           </div>
 
+          {passwordChangedNotice && (
+            <p className="mb-4 rounded-xl border border-emerald-800/70 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
+              {t("auth.passwordChanged")}
+            </p>
+          )}
           {operation.isPending && (
             <p className="mb-4 text-sm text-cyan-300">
               {t("dashboard.operationPending")}
@@ -281,6 +300,13 @@ export function Dashboard({
           diskPath={smartTarget.path}
           solidState={smartTarget.solidState}
           onClose={() => setSmartTarget(null)}
+        />
+      )}
+
+      {changePasswordOpen && (
+        <ChangePasswordDialog
+          onClose={() => setChangePasswordOpen(false)}
+          onSuccess={() => setPasswordChangedNotice(true)}
         />
       )}
 

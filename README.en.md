@@ -17,7 +17,13 @@ SimpleFSManager is a single-administrator Linux disk-management web UI for physi
 
 ## Usage
 
-On first access, authenticate through PAM with an eligible local Linux user and set a separate SimpleFSManager project password. Later logins require the bound username and project password.
+On first startup, SimpleFSManager automatically creates the default administrator account (default username `admin`) and prints a randomly generated initial password to the service console log (viewable via `journalctl -u simplefsmanager`). You can also override the initial credentials via environment variables before the first startup (only applied during initial setup):
+
+```sh
+SFM_ADMIN_USERNAME=admin SFM_ADMIN_PASSWORD=your-strong-password simplefsmanager
+```
+
+After signing in, you can change the password anytime from the top-right menu in the web UI.
 
 Tagged releases provide an `amd64` Debian package on GitHub Releases. Installing it enables and starts the service:
 
@@ -33,13 +39,6 @@ After signing in to the web UI, you can initialize GPT, create or delete partiti
 ## Build and Development
 
 Go 1.26+, Node.js 24+, npm, and the required Linux tools are needed. `lsblk`, `blkid`, `smartctl`, and `mkfs.ext4` are used for disk discovery, filesystem information, SMART data, and ext4 formatting. XFS, btrfs, and f2fs formatting additionally require `mkfs.xfs`, `mkfs.btrfs`, and `mkfs.f2fs`.
-
-Install PAM development headers before building, and install the supplied PAM service file before the first login:
-
-```sh
-sudo apt install libpam0g-dev
-sudo install -m 644 deploy/simplefsmanager.pam /etc/pam.d/simplefsmanager
-```
 
 Run the API:
 

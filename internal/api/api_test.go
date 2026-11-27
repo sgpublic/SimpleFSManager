@@ -414,3 +414,59 @@ func TestDisksRouteUsesCacheAndSupportsForceRefresh(t *testing.T) {
 		t.Fatalf("forced GET = %d, calls = %d; want 2000, 2", size3, calls)
 	}
 }
+
+func TestChangePasswordRoute(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	authSvc := auth.New(database)
+	if _, err := authSvc.EnsureAdministrator(ctx, auth.BootstrapOptions{Password: "initial-password-123"}); err != nil {
+		t.Fatal(err)
+	}
+	oldToken, err := authSvc.Login(ctx, auth.DefaultAdminUsername, "initial-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	disks := storage.New(database.IsManagedUUID)
+	volumes := volume.New(database, disks)
+	handler := New(database, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), disks, volumes, usb.New(disks), http.NotFoundHandler())
+
+	// Unauthenticated request must fail with 401.
+	unauthRec := httptest.NewRecorder()
+	handler.ServeHTTP(unauthRec, httptest.NewRequest(http.MethodPost, "/api/auth/password", strings.NewReader(`{"currentPassword":"initial-password-123","newPassword":"updated-password-456"}`)))
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401", unauthRec.Code)
+	}
+
+	// Authenticated request with valid current password succeeds and rotates session.
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", strings.NewReader(`{"currentPassword":"initial-password-123","newPassword":"updated-password-456"}`))
+	req.AddCookie(auth.SessionCookie(oldToken))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("change password status = %d, want 204: %s", rec.Code, rec.Body.String())
+	}
+
+	var newCookie *http.Cookie
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == "simplefsmanager_session" {
+			newCookie = cookie
+		}
+	}
+	if newCookie == nil || newCookie.Value == "" || newCookie.Value == oldToken {
+		t.Fatalf("expected rotated session cookie, got %#v", newCookie)
+	}
+
+	// Login with updated password succeeds.
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"admin","password":"updated-password-456"}`))
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login with new password status = %d, want 200: %s", loginRec.Code, loginRec.Body.String())
+	}
+}

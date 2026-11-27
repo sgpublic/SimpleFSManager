@@ -7,9 +7,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"math/big"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -19,13 +18,17 @@ import (
 )
 
 const (
-	cookieName        = "simplefsmanager_session"
-	sessionLifetime   = 24 * time.Hour
-	minPasswordLength = 12
-	argonTime         = 3
-	argonMemory       = 64 * 1024
-	argonThreads      = 4
-	argonKeyLength    = 32
+	DefaultAdminUsername    = "admin"
+	cookieName              = "simplefsmanager_session"
+	sessionLifetime         = 24 * time.Hour
+	minPasswordLength       = 12
+	generatedPasswordLength = 16
+	// Unambiguous alphanumeric charset (excludes 0/O, 1/l/I) for readable console output.
+	passwordAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+	argonTime        = 3
+	argonMemory      = 64 * 1024
+	argonThreads     = 4
+	argonKeyLength   = 32
 )
 
 // dummyPasswordHash is verified when a login targets an unknown username so
@@ -45,23 +48,67 @@ type Service struct {
 }
 
 type Status struct {
-	SetupRequired bool   `json:"setupRequired"`
 	Authenticated bool   `json:"authenticated"`
 	Username      string `json:"username,omitempty"`
+}
+
+// BootstrapOptions configures initial administrator creation on first startup.
+// Both fields are ignored once an administrator already exists in the database.
+type BootstrapOptions struct {
+	Username string
+	Password string
+}
+
+type InitResult struct {
+	Username          string
+	GeneratedPassword string
+	Created           bool
 }
 
 func New(database *store.Store) *Service {
 	return &Service{store: database}
 }
 
-func (s *Service) Status(ctx context.Context, request *http.Request) (Status, error) {
-	setupRequired, err := s.store.SetupRequired(ctx)
+// EnsureAdministrator creates the initial administrator account if none exists
+// in the database. Subsequent startups ignore opts and keep existing credentials.
+func (s *Service) EnsureAdministrator(ctx context.Context, opts BootstrapOptions) (InitResult, error) {
+	existing, exists, err := s.store.Administrator(ctx)
 	if err != nil {
-		return Status{}, err
+		return InitResult{}, err
 	}
-	if setupRequired {
-		return Status{SetupRequired: true}, nil
+	if exists {
+		return InitResult{Username: existing.Username, Created: false}, nil
 	}
+
+	username := strings.TrimSpace(opts.Username)
+	if username == "" {
+		username = DefaultAdminUsername
+	}
+	password := opts.Password
+	var generated string
+	if password == "" {
+		generated, err = generatePassword(generatedPasswordLength)
+		if err != nil {
+			return InitResult{}, err
+		}
+		password = generated
+	}
+
+	encodedHash, err := hashPassword(password)
+	if err != nil {
+		return InitResult{}, err
+	}
+	if _, err := s.store.CreateAdministrator(ctx, username, encodedHash); err != nil {
+		return InitResult{}, err
+	}
+	return InitResult{
+		Username:          username,
+		GeneratedPassword: generated,
+		Created:           true,
+	}, nil
+}
+
+func (s *Service) Status(ctx context.Context, request *http.Request) (Status, error) {
 	user, err := s.User(ctx, request)
 	if err != nil {
 		return Status{}, nil
@@ -69,47 +116,7 @@ func (s *Service) Status(ctx context.Context, request *http.Request) (Status, er
 	return Status{Authenticated: true, Username: user.Username}, nil
 }
 
-func (s *Service) Bootstrap(ctx context.Context, username, systemPassword, projectPassword string) (string, error) {
-	setupRequired, err := s.store.SetupRequired(ctx)
-	if err != nil {
-		return "", err
-	}
-	if !setupRequired {
-		return "", apperr.New(http.StatusConflict, apperr.CodeAuthAlreadyConfigured, "administrator is already configured")
-	}
-	if err := eligibleLocalUser(username); err != nil {
-		return "", err
-	}
-	if err := authenticatePAM(username, systemPassword); err != nil {
-		return "", apperr.New(http.StatusUnauthorized, apperr.CodeAuthSystemAuthFailed, "system authentication failed")
-	}
-	if len(projectPassword) < minPasswordLength {
-		return "", apperr.WithParams(
-			http.StatusBadRequest,
-			apperr.CodeAuthPasswordTooShort,
-			fmt.Sprintf("project password must be at least %d characters", minPasswordLength),
-			map[string]any{"minLength": minPasswordLength},
-		)
-	}
-	encodedHash, err := hashPassword(projectPassword)
-	if err != nil {
-		return "", err
-	}
-	user, err := s.store.CreateAdministrator(ctx, username, encodedHash)
-	if err != nil {
-		return "", err
-	}
-	return s.createSession(ctx, user.ID)
-}
-
 func (s *Service) Login(ctx context.Context, username, password string) (string, error) {
-	setupRequired, err := s.store.SetupRequired(ctx)
-	if err != nil {
-		return "", err
-	}
-	if setupRequired {
-		return "", apperr.New(http.StatusConflict, apperr.CodeAuthSetupRequired, "administrator setup is required")
-	}
 	user, err := s.store.UserByUsername(ctx, username)
 	if err != nil {
 		if apperr.IsCode(err, apperr.CodeAuthInvalidCredentials) {
@@ -120,6 +127,33 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 	}
 	if !verifyPassword(user.PasswordHash, password) {
 		return "", apperr.New(http.StatusUnauthorized, apperr.CodeAuthInvalidCredentials, "invalid username or password")
+	}
+	return s.createSession(ctx, user.ID)
+}
+
+// ChangePassword verifies currentPassword, updates the administrator password,
+// invalidates all previous sessions, and returns a fresh session token.
+func (s *Service) ChangePassword(ctx context.Context, user store.User, currentPassword, newPassword string) (string, error) {
+	if !verifyPassword(user.PasswordHash, currentPassword) {
+		return "", apperr.New(http.StatusUnauthorized, apperr.CodeAuthInvalidCredentials, "current password is invalid")
+	}
+	if len(newPassword) < minPasswordLength {
+		return "", apperr.WithParams(
+			http.StatusBadRequest,
+			apperr.CodeAuthPasswordTooShort,
+			fmt.Sprintf("password must be at least %d characters", minPasswordLength),
+			map[string]any{"minLength": minPasswordLength},
+		)
+	}
+	encodedHash, err := hashPassword(newPassword)
+	if err != nil {
+		return "", err
+	}
+	if err := s.store.UpdateAdministratorPassword(ctx, user.ID, encodedHash); err != nil {
+		return "", err
+	}
+	if err := s.store.DeleteAllSessions(ctx); err != nil {
+		return "", err
 	}
 	return s.createSession(ctx, user.ID)
 }
@@ -223,23 +257,17 @@ func (s *Service) createSession(ctx context.Context, userID int64) (string, erro
 	return token, nil
 }
 
-func eligibleLocalUser(username string) error {
-	contents, err := os.ReadFile("/etc/passwd")
-	if err != nil {
-		return fmt.Errorf("read /etc/passwd: %w", err)
-	}
-	for _, line := range strings.Split(string(contents), "\n") {
-		fields := strings.Split(line, ":")
-		if len(fields) < 7 || fields[0] != username {
-			continue
+func generatePassword(length int) (string, error) {
+	max := big.NewInt(int64(len(passwordAlphabet)))
+	result := make([]byte, length)
+	for i := range result {
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", fmt.Errorf("generate initial password: %w", err)
 		}
-		uid, err := strconv.Atoi(fields[2])
-		if err != nil || uid < 1000 || uid == 65534 || fields[6] == "/usr/sbin/nologin" || fields[6] == "/bin/false" {
-			return apperr.New(http.StatusBadRequest, apperr.CodeAuthLocalUserRequired, "administrator must be an eligible local non-root user")
-		}
-		return nil
+		result[i] = passwordAlphabet[n.Int64()]
 	}
-	return apperr.New(http.StatusBadRequest, apperr.CodeAuthLocalUserRequired, "administrator must be an eligible local non-root user")
+	return string(result), nil
 }
 
 func hashPassword(password string) (string, error) {
@@ -284,5 +312,5 @@ func tokenHash(token string) string {
 
 func publicEndpoint(method, path string) bool {
 	return method == http.MethodGet && (path == "/api/health" || path == "/api/build-info" || path == "/api/auth/status") ||
-		method == http.MethodPost && (path == "/api/auth/bootstrap" || path == "/api/auth/login")
+		method == http.MethodPost && path == "/api/auth/login"
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sgpublic/simplefsmanager/internal/api"
+	"github.com/sgpublic/simplefsmanager/internal/auth"
 	"github.com/sgpublic/simplefsmanager/internal/buildinfo"
 	"github.com/sgpublic/simplefsmanager/internal/storage"
 	"github.com/sgpublic/simplefsmanager/internal/store"
@@ -66,6 +67,21 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	initResult, err := auth.New(db).EnsureAdministrator(ctx, auth.BootstrapOptions{
+		Username: os.Getenv("SFM_ADMIN_USERNAME"),
+		Password: os.Getenv("SFM_ADMIN_PASSWORD"),
+	})
+	if err != nil {
+		logger.Error("initialize administrator", "error", err)
+		os.Exit(1)
+	}
+	if initResult.GeneratedPassword != "" {
+		logger.Info("initial administrator created; please change this password after signing in", "username", initResult.Username, "password", initResult.GeneratedPassword)
+	} else if initResult.Created {
+		logger.Info("initial administrator created from environment", "username", initResult.Username)
+	}
+
 	if err := db.DeleteExpiredSessions(ctx, time.Now()); err != nil {
 		logger.Error("clean expired sessions", "error", err)
 	}

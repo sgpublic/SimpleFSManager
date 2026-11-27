@@ -28,7 +28,6 @@ trap 'rm -rf "$staging"' EXIT HUP INT TERM
 mkdir -p "$(dirname "$output")"
 install -D -m 0755 "$binary" "$staging/usr/bin/simplefsmanager"
 install -D -m 0644 deploy/simplefsmanager.service "$staging/lib/systemd/system/simplefsmanager.service"
-install -D -m 0644 deploy/simplefsmanager.pam "$staging/etc/pam.d/simplefsmanager"
 install -D -m 0755 packaging/debian/DEBIAN/postinst "$staging/DEBIAN/postinst"
 install -D -m 0755 packaging/debian/DEBIAN/prerm "$staging/DEBIAN/prerm"
 install -D -m 0755 packaging/debian/DEBIAN/postrm "$staging/DEBIAN/postrm"

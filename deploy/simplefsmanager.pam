@@ -1,3 +1,0 @@
-# Install as /etc/pam.d/simplefsmanager on Debian or Ubuntu.
-@include common-auth
-@include common-account

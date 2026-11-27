@@ -7,7 +7,6 @@ require (
 	github.com/diskfs/go-diskfs v1.9.4
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/jochenvg/go-udev v0.0.0-20240801134859-b65ed646224b
-	github.com/msteinert/pam/v2 v2.1.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.56.0

@@ -9,7 +9,6 @@ import type {
 export type { Disk, FileSystemType, OperationResult, Partition };
 
 export type AuthStatus = {
-  setupRequired: boolean;
   authenticated: boolean;
   username?: string;
 };
@@ -120,7 +119,7 @@ function handleUnauthorized(status: number, path: string) {
   if (
     status === 401 &&
     path !== "/api/auth/login" &&
-    path !== "/api/auth/bootstrap" &&
+    path !== "/api/auth/password" &&
     onUnauthorized
   ) {
     onUnauthorized();

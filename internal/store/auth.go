@@ -16,12 +16,18 @@ type User struct {
 	PasswordHash string
 }
 
-func (s *Store) SetupRequired(ctx context.Context) (bool, error) {
-	var count int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE username <> ''`).Scan(&count); err != nil {
-		return false, fmt.Errorf("check administrator setup: %w", err)
+// Administrator loads the single configured administrator account, if present.
+func (s *Store) Administrator(ctx context.Context) (User, bool, error) {
+	var user User
+	err := s.DB.QueryRowContext(ctx, `SELECT id, username, password_hash FROM users WHERE id = 1 AND username <> ''`).
+		Scan(&user.ID, &user.Username, &user.PasswordHash)
+	if err == sql.ErrNoRows {
+		return User{}, false, nil
 	}
-	return count == 0, nil
+	if err != nil {
+		return User{}, false, fmt.Errorf("load administrator: %w", err)
+	}
+	return user, true, nil
 }
 
 func (s *Store) CreateAdministrator(ctx context.Context, username, passwordHash string) (User, error) {
@@ -37,9 +43,24 @@ func (s *Store) CreateAdministrator(ctx context.Context, username, passwordHash 
 		return User{}, fmt.Errorf("count created administrator: %w", err)
 	}
 	if affected != 1 {
-		return User{}, apperr.New(http.StatusConflict, apperr.CodeAuthAlreadyConfigured, "administrator is already configured")
+		return User{}, fmt.Errorf("administrator is already configured")
 	}
 	return User{ID: 1, Username: username, PasswordHash: passwordHash}, nil
+}
+
+func (s *Store) UpdateAdministratorPassword(ctx context.Context, userID int64, passwordHash string) error {
+	result, err := s.DB.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, passwordHash, userID)
+	if err != nil {
+		return fmt.Errorf("update administrator password: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count updated administrators: %w", err)
+	}
+	if affected != 1 {
+		return apperr.New(http.StatusUnauthorized, apperr.CodeAuthRequired, "administrator not found")
+	}
+	return nil
 }
 
 func (s *Store) UserByUsername(ctx context.Context, username string) (User, error) {
@@ -83,6 +104,13 @@ func (s *Store) SessionUser(ctx context.Context, tokenHash string, now time.Time
 func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, tokenHash); err != nil {
 		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteAllSessions(ctx context.Context) error {
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
+		return fmt.Errorf("delete all sessions: %w", err)
 	}
 	return nil
 }
